@@ -42,19 +42,14 @@ class YFinanceService:
             stock = yf.Ticker(ticker_upper, session=session)
             fast = stock.fast_info
 
-            if fast is None:
-                # Perhaps implement a small sleep and a retry here, or just raise a specific error
-                raise ValueError(f"Yahoo Finance returned an empty response for {ticker}. The API is likely throttling us.")
-
-            if not fast or len(info) <= 5: 
-                raise ValueError(f"The market data provider is currently unavailable for '{ticker}'. Please try again in a few minutes.")
+            if not fast or not hasattr(fast, 'market_cap'): 
+                raise ValueError(f"Yahoo Finance returned an empty response for '{ticker_upper}'. The API is likely throttling us.")
                 
             # --- TIER 5: STRICT EQUITY VALIDATION ---
-            market_cap = fast.get("marketCap")
-            revenue = fast.get("totalRevenue")
+            market_cap = fast.market_cap
             
-            if market_cap is None and revenue is None:
-                raise ValueError(f"'{ticker}' appears to be a commodity, index, or invalid equity. Socrates AI requires publicly traded companies that file SEC 10-Ks.")
+            if market_cap is None or market_cap == 0:
+                raise ValueError(f"'{ticker_upper}' lacks market cap data. Socrates AI requires publicly traded companies.")
                 
         except ValueError as ve:
             raise ve # Pass our custom validation error up to the router
@@ -66,24 +61,24 @@ class YFinanceService:
         pe_ratio = None
         revenue = None
         eps = None
-        totalDept = None
+        total_debt = None
         try:
             # We cautiously peek into .info
             pe_ratio = stock.info.get('trailingPE')
             revenue = stock.info.get('totalRevenue')
             eps = stock.info.get('trailingEps')
-            totalDept = stock.info.get('totalDept')
+            total_debt = stock.info.get('totalDebt')
         except Exception as e:
             print(f"[{ticker_upper}] Yahoo blocked deep fundamentals, falling back to fast_info.")
 
         payload = {
-            "ticker": ticker.upper,
+            "ticker": ticker_upper,
             "revenue": revenue,
             "eps": eps,
             "pe_ratio": pe_ratio,
             "market_cap": market_cap,
-            "total_debt": totalDept,
-            "fiscal_date": datetime.today().strftime('%Y-%m-%d')
+            "total_debt": total_dept,
+            "fiscal_date": today
         }
         
         print(f"Payload ready: {payload}")
