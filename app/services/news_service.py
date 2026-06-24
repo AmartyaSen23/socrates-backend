@@ -1,0 +1,73 @@
+import yfinance as yf
+from app.database import supabase_client
+from datetime import datetime
+from uuid import uuid4
+
+class NewsService:
+    @staticmethod
+    def fetch_and_store_news(ticker: str):
+        print(f"Fetching news for {ticker} from Yahoo Finance...")
+        
+        try:
+            stock = yf.Ticker(ticker)
+            news = stock.news
+        except Exception as e:
+            raise Exception(f"YFinance News API Error: {str(e)}")
+
+        if not news:
+            print(f"No news found for {ticker} (Yahoo Finance might be blocking the request).")
+            # Yahoo sometimes blocks automated requests by returning an empty list
+            # We can use a custom User-Agent to try and bypass this
+            import requests
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            url = f"https://query2.finance.yahoo.com/v1/finance/search?q={ticker}&newsCount=8"
+            response = requests.get(url, headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                news = data.get('news', [])
+            else:
+                raise Exception(f"Fallback request failed with status code {response.status_code}")
+
+            if not news:
+                return {"status": "no news found"}
+            
+        print(f"Successfully pulled {len(news)} articles for {ticker}. Formatting for database...")
+
+        payloads = []
+        for article in news:
+            # Try getting 'link', fallback to 'url' if Yahoo changed their API
+            url = article.get("link", "") or article.get("url", "")
+            if not url:
+                continue # Skip invalid articles to prevent empty URL database conflicts
+                
+            # Fallback to the current time if providerPublishTime is missing
+            pub_time = article.get("providerPublishTime")
+            dt_obj = datetime.fromtimestamp(pub_time) if pub_time else datetime.utcnow()
+            
+            payloads.append({
+                "ticker": ticker.upper(),
+                "title": article.get("title", ""),
+                "summary": article.get("summary", "") or article.get("publisher", ""), 
+                "url": url,
+                "published_at": dt_obj.isoformat(),
+                "created_at": datetime.utcnow().isoformat()
+            })
+        
+        print(f"Pushing {len(payloads)} valid articles to Supabase...")
+        
+        # SAFETY CHECK: Don't ping the database if we have no valid articles!
+        if not payloads:
+            print("No valid articles with URLs were found. Skipping database insertion.")
+            return {"status": "success", "articles_inserted": 0, "message": "Yahoo returned articles without URLs."}
+        
+        try:
+            # Use upsert instead of insert to handle duplicate articles gracefully
+            response = supabase_client.table("soc_news_articles").upsert(
+                payloads, on_conflict="url"
+            ).execute()
+            
+            return {"status": "success", "articles_inserted": len(payloads)}
+        except Exception as e:
+            raise Exception(f"Supabase Database Error: {str(e)}")
