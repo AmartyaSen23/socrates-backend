@@ -1,15 +1,45 @@
 import yfinance as yf
 from app.database import supabase_client
 from datetime import datetime
+import requests
 
 class YFinanceService:
     @staticmethod
     def fetch_and_store_fundamentals(ticker: str):
+        ticker_upper = ticker.upper()
+        today = datetime.today().strftime('%Y-%m-%d')
+
+        # 1. CHECK DATABASE FIRST TO AVOID RATE LIMITS
+        try:
+            cached_data = supabase_client.table("soc_company_fundamentals") \
+                .select("*") \
+                .eq("ticker", ticker_upper) \
+                .eq("fiscal_date", today) \
+                .execute()
+                
+            if cached_data.data:
+                print(f"Data for {ticker_upper} already exists for today. Skipping Yahoo Finance.")
+                return cached_data.data
+        except Exception as e:
+            print(f"Cache check failed, proceeding to fetch: {e}")
+        
         print(f"Fetching fundamentals for {ticker} from Yahoo Finance...")
+        session = requests.Session()
+
+        # 2. USE A CUSTOM SESSION WITH A REAL BROWSER USER-AGENT
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': '*/*',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive'
+        })
+
         market_cap = None
         revenue = None
+
         try:
-            stock = yf.Ticker(ticker)
+            # Pass the custom session to yfinance
+            stock = yf.Ticker(ticker_upper, session=session)
             info = stock.info
 
             if info is None:
