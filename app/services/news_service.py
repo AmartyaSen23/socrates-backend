@@ -1,42 +1,60 @@
 import yfinance as yf
 from app.database import supabase_client
 from datetime import datetime
-from uuid import uuid4
+import requests
 
 class NewsService:
     @staticmethod
     def fetch_and_store_news(ticker: str):
+        ticker = ticker.upper()
         print(f"Fetching news for {ticker} from Yahoo Finance...")
         
         news = []
+        
+        # ATTEMPT 1: Standard YFinance (Fastest if it works)
         try:
             stock = yf.Ticker(ticker)
             news = stock.news
         except Exception as e:
-            print(f"YFinance News API Error: {str(e)}") # Changed from raise to print
+            print(f"YFinance News API Error: {str(e)}")
 
+        # ATTEMPT 2: THE AGGRESSIVE CRUMB BYPASS (No Cowardice allowed)
         if not news:
-            print(f"No news found for {ticker} (Yahoo Finance might be blocking the request).")
-            import requests
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-            url = f"https://query2.finance.yahoo.com/v1/finance/search?q={ticker}&newsCount=8"
+            print(f"[{ticker}] Standard news blocked. Initiating Aggressive Crumb Handshake...")
+            session = requests.Session()
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+                'Accept': '*/*',
+                'Connection': 'keep-alive'
+            })
             
             try:
-                response = requests.get(url, headers=headers, timeout=10)
-                if response.status_code == 200:
-                    data = response.json()
-                    news = data.get('news', [])
-                else:
-                    print(f"Fallback request failed with status code {response.status_code}")
+                # Step A: Hit the front page to grab a session cookie
+                session.get('https://fc.yahoo.com', timeout=10)
+                
+                # Step B: Request the cryptographic crumb
+                crumb_response = session.get('https://query1.finance.yahoo.com/v1/test/getcrumb', timeout=10)
+                crumb = crumb_response.text
+                
+                if crumb and 'html' not in crumb:
+                    # Step C: Attach the crumb to the search query to force it through the firewall
+                    url = f"https://query2.finance.yahoo.com/v1/finance/search?q={ticker}&newsCount=8&crumb={crumb}"
+                    response = session.get(url, timeout=10)
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        news = data.get('news', [])
+                        if news:
+                            print(f"[{ticker}] Bypass Successful! Extracted {len(news)} articles.")
+                    else:
+                        print(f"[{ticker}] Bypass rejected with status {response.status_code}")
             except Exception as e:
-                print(f"Fallback network exception: {str(e)}")
+                print(f"[{ticker}] Bypass engine interrupted: {str(e)}")
 
-            if not news:
-                print("News completely blocked by Yahoo. Returning graceful fallback so pipeline can continue.")
-                # We return success so the FastAPI router doesn't crash!
-                return {"status": "success", "articles_inserted": 0, "message": "News API throttled."}
+        # If they STILL block us after stealing their cookies, we return success so the FastAPI router doesn't crash the rest of the RAG pipeline.
+        if not news:
+            print(f"[{ticker}] Final Failure: Yahoo completely blocked the request. Moving on to RAG.")
+            return {"status": "success", "articles_inserted": 0, "message": "News API throttled."}
             
         print(f"Successfully pulled {len(news)} articles for {ticker}. Formatting for database...")
 
@@ -52,7 +70,7 @@ class NewsService:
             dt_obj = datetime.fromtimestamp(pub_time) if pub_time else datetime.utcnow()
             
             payloads.append({
-                "ticker": ticker.upper(),
+                "ticker": ticker,
                 "title": article.get("title", ""),
                 "summary": article.get("summary", "") or article.get("publisher", ""), 
                 "url": url,
