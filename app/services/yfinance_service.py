@@ -77,7 +77,7 @@ class YFinanceService:
             "eps": eps,
             "pe_ratio": pe_ratio,
             "market_cap": market_cap,
-            "total_debt": total_dept,
+            "total_debt": total_debt,
             "fiscal_date": today
         }
         
