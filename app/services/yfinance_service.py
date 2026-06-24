@@ -40,18 +40,18 @@ class YFinanceService:
         try:
             # Pass the custom session to yfinance
             stock = yf.Ticker(ticker_upper, session=session)
-            info = stock.info
+            fast = stock.fast_info
 
-            if info is None:
+            if fast is None:
                 # Perhaps implement a small sleep and a retry here, or just raise a specific error
                 raise ValueError(f"Yahoo Finance returned an empty response for {ticker}. The API is likely throttling us.")
 
-            if not info or len(info) <= 5: 
+            if not fast or len(info) <= 5: 
                 raise ValueError(f"The market data provider is currently unavailable for '{ticker}'. Please try again in a few minutes.")
                 
             # --- TIER 5: STRICT EQUITY VALIDATION ---
-            market_cap = info.get("marketCap")
-            revenue = info.get("totalRevenue")
+            market_cap = fast.get("marketCap")
+            revenue = fast.get("totalRevenue")
             
             if market_cap is None and revenue is None:
                 raise ValueError(f"'{ticker}' appears to be a commodity, index, or invalid equity. Socrates AI requires publicly traded companies that file SEC 10-Ks.")
@@ -63,13 +63,22 @@ class YFinanceService:
             
         print(f"Successfully pulled data for {ticker}. Formatting for database...")
 
+        pe_ratio = None
+        revenue = None
+        try:
+            # We cautiously peek into .info
+            pe_ratio = stock.info.get('trailingPE')
+            revenue = stock.info.get('totalRevenue')
+        except Exception as e:
+            print(f"[{ticker_upper}] Yahoo blocked deep fundamentals, falling back to fast_info.")
+
         payload = {
-            "ticker": ticker.upper(),
+            "ticker": ticker.upper,
             "revenue": revenue,
-            "eps": info.get("trailingEps"),
-            "pe_ratio": info.get("trailingPE"),
+            "eps": fast.get("trailingEps"),
+            "pe_ratio": pe_ratio,
             "market_cap": market_cap,
-            "total_debt": info.get("totalDebt"),
+            "total_debt": fast.get("totalDebt"),
             "fiscal_date": datetime.today().strftime('%Y-%m-%d')
         }
         
