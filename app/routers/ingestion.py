@@ -87,13 +87,8 @@ async def generate_research_report(ticker: str, background_tasks: BackgroundTask
         except ValueError as ve:
             log_update(ticker, f"Validation failed: {ve}")
             suggestions = get_ticker_suggestions(ticker)
-            raise HTTPException(
-                status_code=400, 
-                detail={
-                    "message": str(ve),
-                    "suggestions": suggestions
-                }
-            )
+            suggestion_text = f" Did you mean: {', '.join(suggestions)}?" if suggestions else ""
+            raise HTTPException(status_code=400, detail=str(ve) + suggestion_text)
             
         # 2. Fetch News
         log_update(ticker, "Fetching latest market news...")
