@@ -12,8 +12,8 @@ class YFinanceService:
             stock = yf.Ticker(ticker)
             info = stock.info
 
-            if not info or len(info) <= 2:
-                raise ValueError(f"No public data available for '{ticker}'.")
+            if not info or len(info) <= 5: 
+                raise ValueError(f"The market data provider is currently unavailable for '{ticker}'. Please try again in a few minutes.")
                 
             # --- TIER 5: STRICT EQUITY VALIDATION ---
             market_cap = info.get("marketCap")
