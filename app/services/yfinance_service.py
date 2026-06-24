@@ -65,20 +65,24 @@ class YFinanceService:
 
         pe_ratio = None
         revenue = None
+        eps = None
+        totalDept = None
         try:
             # We cautiously peek into .info
             pe_ratio = stock.info.get('trailingPE')
             revenue = stock.info.get('totalRevenue')
+            eps = stock.info.get('trailingEps')
+            totalDept = stock.info.get('totalDept')
         except Exception as e:
             print(f"[{ticker_upper}] Yahoo blocked deep fundamentals, falling back to fast_info.")
 
         payload = {
             "ticker": ticker.upper,
             "revenue": revenue,
-            "eps": fast.get("trailingEps"),
+            "eps": eps,
             "pe_ratio": pe_ratio,
             "market_cap": market_cap,
-            "total_debt": fast.get("totalDebt"),
+            "total_debt": totalDept,
             "fiscal_date": datetime.today().strftime('%Y-%m-%d')
         }
         
