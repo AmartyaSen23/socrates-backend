@@ -12,6 +12,10 @@ class YFinanceService:
             stock = yf.Ticker(ticker)
             info = stock.info
 
+            if info is None:
+                # Perhaps implement a small sleep and a retry here, or just raise a specific error
+                raise ValueError(f"Yahoo Finance returned an empty response for {ticker}. The API is likely throttling us.")
+
             if not info or len(info) <= 5: 
                 raise ValueError(f"The market data provider is currently unavailable for '{ticker}'. Please try again in a few minutes.")
                 
