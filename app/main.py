@@ -18,7 +18,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "https://socrates-frontend-blush.vercel.app/"
+        "https://socrates-frontend.vercel.app",
+        "https://socrates-frontend-blush.vercel.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
