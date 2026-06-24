@@ -16,7 +16,10 @@ app = FastAPI(title="Socrates Research Engine Backend", version="1.0.0", lifespa
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"], # Allows your Next.js app to fetch data
+    allow_origins=[
+        "http://localhost:3000",
+        "https://socrates-frontend-blush.vercel.app/"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
