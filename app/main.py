@@ -29,5 +29,6 @@ app.add_middleware(
 app.include_router(ingestion.router)
 
 @app.get("/")
+@app.head("/")
 def read_root():
     return {"message": "Socrates Engine Live"}
