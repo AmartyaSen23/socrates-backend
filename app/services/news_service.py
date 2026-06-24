@@ -52,20 +52,35 @@ class NewsService:
             
         print(f"Successfully pulled {len(news)} articles for {ticker}. Formatting for database...")
 
+        # THE SYNDICATED GARBAGE BLACKLIST
+        # Add any repetitive clickbait phrases you notice here
+        spam_keywords = [
+            "wall street", "top calls", "asian equities", "depositary receipts", 
+            "market wrap", "dow jones", "movers", "stocks to watch", 
+            "zacks", "market update", "why is it moving"
+        ]
+
         payloads = []
         for article in news:
-            # Try getting 'link', fallback to 'url' if Yahoo changed their API
+            title = article.get("title", "")
+            title_lower = title.lower()
+
+            # 1. Filter out known spam
+            if any(spam in title_lower for spam in spam_keywords):
+                print(f"[{ticker}] Blocked syndicated noise: {title}")
+                continue
+
+            # Try getting 'link', fallback to 'url'
             url = article.get("link", "") or article.get("url", "")
             if not url:
-                continue # Skip invalid articles to prevent empty URL database conflicts
+                continue
                 
-            # Fallback to the current time if providerPublishTime is missing
             pub_time = article.get("providerPublishTime")
             dt_obj = datetime.fromtimestamp(pub_time) if pub_time else datetime.utcnow()
             
             payloads.append({
-                "ticker": ticker,
-                "title": article.get("title", ""),
+                "ticker": ticker.upper(),
+                "title": title,
                 "summary": article.get("summary", "") or article.get("publisher", ""), 
                 "url": url,
                 "published_at": dt_obj.isoformat(),
