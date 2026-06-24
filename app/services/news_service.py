@@ -11,12 +11,6 @@ class NewsService:
         
         news = []
         
-        # ATTEMPT 1: Standard YFinance (Fastest if it works)
-        try:
-            stock = yf.Ticker(ticker)
-            news = stock.news
-        except Exception as e:
-            print(f"YFinance News API Error: {str(e)}")
 
         # ATTEMPT 2: THE AGGRESSIVE CRUMB BYPASS (No Cowardice allowed)
         if not news:
