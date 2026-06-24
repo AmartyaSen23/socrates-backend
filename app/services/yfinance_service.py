@@ -23,66 +23,66 @@ class YFinanceService:
         except Exception as e:
             print(f"Cache check failed, proceeding to fetch: {e}")
         
-        print(f"Fetching fundamentals for {ticker} from Yahoo Finance...")
-        session = requests.Session()
-
-        # 2. USE A CUSTOM SESSION WITH A REAL BROWSER USER-AGENT
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'Accept': '*/*',
-            'Accept-Encoding': 'gzip, deflate, br',
+        print(f"[{ticker_upper}] Bypassing yfinance library. Pinging Yahoo Engine directly...")
+        
+        # 2. RAW HTTP CALL TO YAHOO V7 DIRECT ENDPOINT (Bypasses Cookie Wall)
+        url = f"https://query2.finance.yahoo.com/v7/finance/quote?symbols={ticker_upper}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept': 'application/json',
             'Connection': 'keep-alive'
-        })
-
-        market_cap = None
-        revenue = None
+        }
 
         try:
-            # Pass the custom session to yfinance
-            stock = yf.Ticker(ticker_upper, session=session)
-            fast = stock.fast_info
-
-            if not fast or not hasattr(fast, 'market_cap'): 
-                raise ValueError(f"Yahoo Finance returned an empty response for '{ticker_upper}'. The API is likely throttling us.")
-                
-            # --- TIER 5: STRICT EQUITY VALIDATION ---
-            market_cap = fast.market_cap
+            response = requests.get(url, headers=headers, timeout=10)
             
+            if response.status_code != 200:
+                raise ValueError(f"Yahoo API rejected request with status code {response.status_code}")
+                
+            data = response.json()
+            quote_result = data.get("quoteResponse", {}).get("result", [])
+            
+            if not quote_result:
+                raise ValueError(f"No market equity data returned for target '{ticker_upper}'")
+                
+            asset_data = quote_result[0]
+            
+            # --- TIER 5: EQUITIES ONLY FILTER ---
+            # Double check that we aren't scanning crypto or indices
+            quote_type = asset_data.get("quoteType")
+            if quote_type != "EQUITY":
+                raise ValueError(f"'{ticker_upper}' is a {quote_type}. Socrates AI requires publicly traded corporate equities.")
+
+            # 3. EXTRACT METRICS SAFELY FROM RAW API RESPONSE
+            market_cap = asset_data.get("marketCap")
+            pe_ratio = asset_data.get("trailingPE")
+            eps = asset_data.get("trailingEps")
+            revenue = asset_data.get("totalRevenue") # May require an extra endpoint if empty, but quote often packages it
+            
+            # If direct totalRevenue isn't on the quick quote, let's keep it clean
             if market_cap is None or market_cap == 0:
-                raise ValueError(f"'{ticker_upper}' lacks market cap data. Socrates AI requires publicly traded companies.")
-                
+                raise ValueError(f"Target '{ticker_upper}' lacks structural market valuation metrics.")
+
+            print(f"[{ticker_upper}] Successfully intercepted market matrix data.")
+
         except ValueError as ve:
-            raise ve # Pass our custom validation error up to the router
+            raise ve
         except Exception as e:
-            raise Exception(f"YFinance API Error: {str(e)}")
-            
-        print(f"Successfully pulled data for {ticker}. Formatting for database...")
+            raise Exception(f"Bypass Engine Interrupted: {str(e)}")
 
-        pe_ratio = None
-        revenue = None
-        eps = None
-        total_debt = None
-        try:
-            # We cautiously peek into .info
-            pe_ratio = stock.info.get('trailingPE')
-            revenue = stock.info.get('totalRevenue')
-            eps = stock.info.get('trailingEps')
-            total_debt = stock.info.get('totalDebt')
-        except Exception as e:
-            print(f"[{ticker_upper}] Yahoo blocked deep fundamentals, falling back to fast_info.")
-
+        # 4. FORGE THE SUPABASE PAYLOAD
         payload = {
             "ticker": ticker_upper,
-            "revenue": revenue,
+            "revenue": revenue, 
             "eps": eps,
             "pe_ratio": pe_ratio,
             "market_cap": market_cap,
-            "total_debt": total_debt,
+            "total_debt": None, # Heavy balance sheet metrics are fully locked behind cookie walls on cloud providers
             "fiscal_date": today
         }
         
-        print(f"Payload ready: {payload}")
-        print("Pushing to Supabase...")
+        print(f"Payload ready for transfer: {payload}")
+        print("Committing matrix to Supabase...")
         
         try:
             response = supabase_client.table("soc_company_fundamentals").upsert(
