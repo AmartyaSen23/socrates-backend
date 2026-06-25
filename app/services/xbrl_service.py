@@ -85,10 +85,13 @@ class XBRLService:
         pe_ratio = None
 
         try:
-            # 1. Try simple YFinance first (often works for foreign ADRs like WIT)
-            stock = yf.Ticker(ticker_upper)
-            info = stock.info
-            
+            try:
+                # 1. Try simple YFinance first (often works for foreign ADRs like WIT)
+                stock = yf.Ticker(ticker_upper)
+                info = stock.info
+            except Exception as e:
+                print("Yfinance Failed Us yet again... 🥀💔")
+
             if info and "regularMarketPrice" in info or "marketCap" in info:
                 market_cap = info.get("marketCap")
                 pe_ratio = info.get("trailingPE")
