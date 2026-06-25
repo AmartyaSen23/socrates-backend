@@ -5,9 +5,37 @@ from bs4 import BeautifulSoup
 from sec_edgar_downloader import Downloader
 from app.database import supabase_client
 from datetime import datetime
-from app.status_store import log_update, get_logs, clear_logs
+from app.status_store import log_update
 
 class SECService:
+    @staticmethod
+    def extract_debt_from_text(text: str) -> float | None:
+        """Attempts to extract Total Debt from SEC prose using Regex."""
+        # Looks for: Total debt [of/was/is] [up to $] X,XXX million/billion
+        pattern = r"Total\s+debt.*?\$?\s*([\d,]+(?:\.\d+)?)\s*(million|billion|trillion|lakhs?|crores?|cr)?"
+        match = re.search(pattern, text, re.IGNORECASE)
+        
+        if match:
+            try:
+                # Clean the number string (e.g., "5,000" -> 5000.0)
+                val_str = match.group(1).replace(',', '')
+                val = float(val_str)
+                
+                # Apply multiplier if found
+                multiplier_str = match.group(2)
+                if multiplier_str:
+                    multiplier_str = multiplier_str.lower()
+                    if multiplier_str == "million":
+                        val *= 1_000_000
+                    elif multiplier_str == "billion":
+                        val *= 1_000_000_000
+                    elif multiplier_str == "trillion":
+                        val *= 1_000_000_000_000
+                return val
+            except ValueError:
+                return None
+        return None
+
     @staticmethod
     def fetch_and_store_10k(ticker: str):
         ticker = ticker.upper()
@@ -48,9 +76,22 @@ class SECService:
                     clean_text = soup.get_text(separator="\n")
                     clean_text = re.sub(r'\n\s*\n', '\n\n', clean_text) # Remove massive whitespace
                     
+                    # --- NEW: ATTEMPT TO EXTRACT DEBT ---
+                    extracted_debt = SECService.extract_debt_from_text(clean_text)
+                    if extracted_debt is not None:
+                        log_update(ticker, f"Extracted Total Debt from {form}: ${extracted_debt:,.2f}")
+                        # Update the fundamentals table with the found debt
+                        try:
+                            supabase_client.table("soc_company_fundamentals").update(
+                                {"total_debt": extracted_debt}
+                            ).eq("ticker", ticker).eq("fiscal_date", today_str).execute()
+                        except Exception as e:
+                            log_update(ticker, f"Warning: Failed to update debt in DB: {e}")
+                    else:
+                        log_update(ticker, f"Could not reliably extract Total Debt from {form} prose.")
+
                     # Convert string back to bytes for Supabase upload
                     file_data = clean_text.encode('utf-8')
-                    
                     storage_path = f"{ticker}/{form}/{accession_number}.txt"
                     log_update(ticker, f"Uploading clean, compressed {form} text to Supabase...")
                     
@@ -64,7 +105,8 @@ class SECService:
                         "ticker": ticker,
                         "form_type": form,
                         "filed_at": datetime.today().strftime('%Y-%m-%d'),
-                        "storage_bucket_url": storage_path
+                        "storage_bucket_url": storage_path,
+                        "is_ready": False # Explicitly set to False initially
                     }).execute()
                     
                     return {"status": "success", "form": form, "db_record": db_res.data}
