@@ -1,107 +1,104 @@
-import yfinance as yf
+import requests
 from app.database import supabase_client
 from datetime import datetime
-import requests
+from app.config import settings
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+import alpaca_trade_api as tradeapi
+
 
 class NewsService:
     @staticmethod
     def fetch_and_store_news(ticker: str):
-        ticker = ticker.upper()
-        print(f"Fetching news for {ticker} from Yahoo Finance...")
-        
-        news = []
-        
-
-        # ATTEMPT 2: THE AGGRESSIVE CRUMB BYPASS (No Cowardice allowed)
-        if not news:
-            print(f"[{ticker}] Standard news blocked. Initiating Aggressive Crumb Handshake...")
-            session = requests.Session()
-            session.headers.update({
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-                'Accept': '*/*',
-                'Connection': 'keep-alive'
-            })
-            
-            try:
-                # Step A: Hit the front page to grab a session cookie
-                session.get('https://fc.yahoo.com', timeout=10)
-                
-                # Step B: Request the cryptographic crumb
-                crumb_response = session.get('https://query1.finance.yahoo.com/v1/test/getcrumb', timeout=10)
-                crumb = crumb_response.text
-                
-                if crumb and 'html' not in crumb:
-                    # Step C: Attach the crumb to the search query to force it through the firewall
-                    url = f"https://query2.finance.yahoo.com/v1/finance/search?q={ticker}&newsCount=8&crumb={crumb}"
-                    response = session.get(url, timeout=10)
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        news = data.get('news', [])
-                        if news:
-                            print(f"[{ticker}] Bypass Successful! Extracted {len(news)} articles.")
-                    else:
-                        print(f"[{ticker}] Bypass rejected with status {response.status_code}")
-            except Exception as e:
-                print(f"[{ticker}] Bypass engine interrupted: {str(e)}")
-
-        # If they STILL block us after stealing their cookies, we return success so the FastAPI router doesn't crash the rest of the RAG pipeline.
-        if not news:
-            print(f"[{ticker}] Final Failure: Yahoo completely blocked the request. Moving on to RAG.")
-            return {"status": "success", "articles_inserted": 0, "message": "News API throttled."}
-            
-        print(f"Successfully pulled {len(news)} articles for {ticker}. Formatting for database...")
-
-        # THE SYNDICATED GARBAGE BLACKLIST
-        # Add any repetitive clickbait phrases you notice here
-        spam_keywords = [
-            "wall street", "top calls", "asian equities", "depositary receipts", 
-            "market wrap", "dow jones", "movers", "stocks to watch", 
-            "zacks", "market update", "why is it moving"
-        ]
-
-        payloads = []
-        for article in news:
-            title = article.get("title", "")
-            title_lower = title.lower()
-
-            # 1. Filter out known spam
-            if any(spam in title_lower for spam in spam_keywords):
-                print(f"[{ticker}] Blocked syndicated noise: {title}")
-                continue
-
-            # Try getting 'link', fallback to 'url'
-            url = article.get("link", "") or article.get("url", "")
-            if not url:
-                continue
-                
-            pub_time = article.get("providerPublishTime")
-            dt_obj = datetime.fromtimestamp(pub_time) if pub_time else datetime.utcnow()
-            
-            payloads.append({
-                "ticker": ticker.upper(),
-                "title": title,
-                "summary": article.get("summary", "") or article.get("publisher", ""), 
-                "url": url,
-                "published_at": dt_obj.isoformat(),
-                "created_at": datetime.utcnow().isoformat()
-            })
-        
-        print(f"Pushing {len(payloads)} valid articles to Supabase...")
-        
-        # SAFETY CHECK: Don't ping the database if we have no valid articles!
-        if not payloads:
-            print("No valid articles with URLs were found. Skipping database insertion.")
-            return {"status": "success", "articles_inserted": 0, "message": "Yahoo returned articles without URLs."}
+        ticker_upper = ticker.upper()
+        ticker_lower = ticker.lower()
+        print(f"[{ticker_upper}] Fetching institutional news from Alpaca SDK...")
         
         try:
-            # Use upsert instead of insert to handle duplicate articles gracefully
+            # Initialize Alpaca SDK REST Client
+            # Base URL doesn't strictly matter for News (it auto-routes to data.alpaca.markets), but we provide the standard.
+            nlp_api = tradeapi.REST(
+                key_id=settings.alpaca_api_key,
+                secret_key=settings.alpaca_secret,
+                base_url='https://api.alpaca.markets', 
+                api_version='v2'
+            )
+            
+            # 🛡️ Hard Timeout to prevent Alpaca server hangs from freezing the pipeline
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(nlp_api.get_news, ticker_upper, limit=15)
+                live_news = future.result(timeout=10.0) # 10 second maximum allowance
+                
+        except TimeoutError:
+            print(f"[{ticker_upper}] ⚠️ CRITICAL: Alpaca News API timed out after 10s. Defaulting to empty to maintain flow.")
+            return {"status": "success", "articles_inserted": 0, "message": "News API timed out."}
+        except Exception as e:
+            print(f"[{ticker_upper}] ⚠️ Broker News API offline or failed: {e}")
+            return {"status": "error", "message": "Broker API failed."}
+            
+        if not live_news:
+            print(f"[{ticker_upper}] ⚠️ No live news items returned from exchange.")
+            return {"status": "success", "articles_inserted": 0, "message": "No news available."}
+            
+        print(f"[{ticker_upper}] Successfully pulled {len(live_news)} Benzinga articles. Formatting...")
+        
+        payloads = []
+        for item in live_news:
+            # Alpaca SDK returns Entity objects, so we use getattr
+            headline = getattr(item, 'headline', '')
+            summary = getattr(item, 'summary', '')
+            url = getattr(item, 'url', '')
+            
+            if not url or not headline:
+                continue
+                
+            full_text = f"{headline}. {summary}".lower()
+            
+            # 🛡️ THE FLEXIBLE ENTITY GATE (Dynamic per ticker)
+            # Ensures we don't ingest a generic "Market Wrap" unless it specifically mentions our target
+            valid_entities = [ticker_lower]
+            if company_name:
+                valid_entities.append(company_name.lower())
+                
+            if not any(entity in full_text for entity in valid_entities):
+                print(f"[{ticker_upper}] Dropped syndicated noise (Target entity not explicitly mentioned in text): {headline}")
+                continue
+                
+            # Handle SDK's datetime object or string gracefully
+            created_at_raw = getattr(item, 'created_at', None)
+            if hasattr(created_at_raw, 'isoformat'):
+                pub_time_str = created_at_raw.isoformat()
+            elif isinstance(created_at_raw, str):
+                try:
+                    # Parse the raw string into a structured datetime object, then convert to clean ISO
+                    pub_time_str = parser.isoparse(created_at_raw).isoformat()
+                except Exception:
+                    try:
+                        pub_time_str = parser.parse(created_at_raw).isoformat()
+                    except Exception:
+                        pub_time_str = datetime.utcnow().isoformat()
+            else:
+                pub_time_str = str(created_at_raw) if created_at_raw else datetime.utcnow().isoformat()
+            
+            payloads.append({
+                "ticker": ticker_upper,
+                "title": headline,
+                "summary": summary, 
+                "url": url,
+                "published_at": pub_time_str,
+                "created_at": datetime.utcnow().isoformat()
+            })
+            
+        if not payloads:
+            print(f"[{ticker_upper}] No valid, entity-specific URLs found after filtering.")
+            return {"status": "success", "articles_inserted": 0, "message": "No valid entity-specific URLs."}
+            
+        try:
+            # Upsert to Supabase
             response = supabase_client.table("soc_news_articles").upsert(
                 payloads, on_conflict="url"
             ).execute()
-            
+            print(f"[{ticker_upper}] {len(payloads)} Filtered Alpaca News injected to Supabase successfully! Response: {response}")
             return {"status": "success", "articles_inserted": len(payloads)}
         except Exception as e:
-            print(f"Supabase Database Error: {str(e)}")
-            # Don't kill the pipeline just because the database hiccuped on news
+            print(f"[{ticker_upper}] Supabase Database Error: {str(e)}")
             return {"status": "error", "message": "Failed to save news to DB."}

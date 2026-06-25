@@ -6,6 +6,8 @@ class Settings(BaseSettings):
     cohere_api_key: str
     fred_api_key: str
     groq_api_key: str
+    alpaca_api_key: str
+    alpaca_secret: str
 
     model_config = SettingsConfigDict(env_file=".env")
 
