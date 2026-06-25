@@ -85,48 +85,47 @@ class XBRLService:
         pe_ratio = None
 
         try:
-            try:
-                # 1. Try simple YFinance first (often works for foreign ADRs like WIT)
-                stock = yf.Ticker(ticker_upper)
-                info = stock.info
-            except Exception as e:
-                print("Yfinance Failed Us yet again... 🥀💔")
-
-            if info and "regularMarketPrice" in info or "marketCap" in info:
-                market_cap = info.get("marketCap")
-                pe_ratio = info.get("trailingPE")
-                if eps is None: eps = info.get("trailingEps")
-                if revenue is None: revenue = info.get("totalRevenue")
-                if total_debt is None: total_debt = info.get("totalDebt")
-                log_update(ticker_upper, "Successfully extracted valuation from standard Yahoo.")
+            log_update(ticker_upper, "Attempting Crumb Handshake for Live Valuation...")
+            session = requests.Session()
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+                'Accept': '*/*'
+            })
+            
+            # Step A: Hit the front page to grab a session cookie
+            session.get('https://fc.yahoo.com', timeout=10)
+            
+            # Step B: Request the cryptographic crumb
+            crumb_response = session.get('https://query1.finance.yahoo.com/v1/test/getcrumb', timeout=10)
+            crumb = crumb_response.text
+            
+            if not crumb or 'html' in crumb:
+                raise ValueError("Yahoo security blockade: Failed to generate authentication crumb.")
+            
+            # Step C: Attach the crumb to our v7 query
+            url = f"https://query2.finance.yahoo.com/v7/finance/quote?symbols={ticker_upper}&crumb={crumb}"
+            response = session.get(url, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                quote_result = data.get("quoteResponse", {}).get("result", [])
+                
+                if quote_result:
+                    asset_data = quote_result[0]
+                    if asset_data.get("quoteType") != "EQUITY":
+                        raise ValueError(f"'{ticker_upper}' is a {asset_data.get('quoteType')}. Socrates AI requires equities.")
+                    
+                    market_cap = asset_data.get("marketCap")
+                    pe_ratio = asset_data.get("trailingPE")
+                    if eps is None: eps = asset_data.get("trailingEps")
+                    if revenue is None: revenue = asset_data.get("totalRevenue")
+                    # Note: We rely on SEC for total_debt, Yahoo rarely provides it accurately here.
+                    
+                    log_update(ticker_upper, "Successfully bypassed security and extracted matrix data.")
+                else:
+                     raise ValueError(f"No market equity data returned for target '{ticker_upper}'")
             else:
-                # 2. If standard YFinance is blocked, use the Crumb Bypass
-                log_update(ticker_upper, "Standard Yahoo blocked. Attempting Crumb Handshake...")
-                session = requests.Session()
-                session.headers.update({
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-                    'Accept': '*/*'
-                })
-                session.get('https://fc.yahoo.com', timeout=10)
-                crumb_response = session.get('https://query1.finance.yahoo.com/v1/test/getcrumb', timeout=10)
-                crumb = crumb_response.text
-                
-                url = f"https://query2.finance.yahoo.com/v7/finance/quote?symbols={ticker_upper}&crumb={crumb}"
-                response = session.get(url, timeout=10)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    quote_result = data.get("quoteResponse", {}).get("result", [])
-                    if quote_result:
-                        asset_data = quote_result[0]
-                        if asset_data.get("quoteType") != "EQUITY":
-                            raise ValueError(f"'{ticker_upper}' is a {asset_data.get('quoteType')}. Socrates AI requires equities.")
-                        
-                        market_cap = asset_data.get("marketCap")
-                        pe_ratio = asset_data.get("trailingPE")
-                        if eps is None: eps = asset_data.get("trailingEps")
-                        if revenue is None: revenue = asset_data.get("totalRevenue")
-                        log_update(ticker_upper, "Successfully bypassed security and extracted matrix data.")
+                 raise ValueError(f"Yahoo API rejected request with status code {response.status_code}")
 
             if market_cap is None or market_cap == 0:
                 raise ValueError(f"Target '{ticker_upper}' lacks structural market valuation metrics.")
