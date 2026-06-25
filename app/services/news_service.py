@@ -1,10 +1,10 @@
-import requests
+import alpaca_trade_api as tradeapi
 from app.database import supabase_client
 from datetime import datetime
 from app.config import settings
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
-import alpaca_trade_api as tradeapi
-
+from dateutil import parser
+import re
 
 class NewsService:
     @staticmethod
@@ -23,10 +23,32 @@ class NewsService:
                 api_version='v2'
             )
             
-            # 🛡️ Hard Timeout to prevent Alpaca server hangs from freezing the pipeline
+            # 🛡️ DYNAMIC ENTITY GENERATION
+            try:
+                # Ask Alpaca for the official company name
+                asset = nlp_api.get_asset(ticker_upper)
+                raw_name = getattr(asset, 'name', '').lower()
+                
+                # Strip out corporate suffixes (e.g., "Apple Inc." -> "apple", "NVIDIA Corporation" -> "nvidia")
+                clean_name = re.sub(r',?\s+(inc\.|inc|corp\.|corp|corporation|llc|plc|ltd\.|ltd|company|co\.|co)\b', '', raw_name).strip()
+            except Exception:
+                clean_name = ""
+
+            # Build our targeted keyword list
+            valid_entities = [ticker_lower]
+            if clean_name:
+                valid_entities.append(clean_name)
+                # Sometimes the brand is best known by its first word (e.g., "Palantir Technologies" -> "palantir")
+                first_word = clean_name.split()[0]
+                if len(first_word) > 2 and first_word not in valid_entities:
+                    valid_entities.append(first_word)
+                    
+            print(f"[{ticker_upper}] Entity Gate tracking keywords: {valid_entities}")
+
+            # 🛡️ Hard Timeout to prevent Alpaca server hangs
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(nlp_api.get_news, ticker_upper, limit=15)
-                live_news = future.result(timeout=10.0) # 10 second maximum allowance
+                live_news = future.result(timeout=10.0)
                 
         except TimeoutError:
             print(f"[{ticker_upper}] ⚠️ CRITICAL: Alpaca News API timed out after 10s. Defaulting to empty to maintain flow.")
@@ -53,23 +75,17 @@ class NewsService:
                 
             full_text = f"{headline}. {summary}".lower()
             
-            # 🛡️ THE FLEXIBLE ENTITY GATE (Dynamic per ticker)
-            # Ensures we don't ingest a generic "Market Wrap" unless it specifically mentions our target
-            valid_entities = [ticker_lower]
-            if company_name:
-                valid_entities.append(company_name.lower())
-                
+            # 🛡️ THE DYNAMIC ENTITY GATE
+            # If NONE of our targeted keywords appear in the headline or summary, we drop the article
             if not any(entity in full_text for entity in valid_entities):
-                print(f"[{ticker_upper}] Dropped syndicated noise (Target entity not explicitly mentioned in text): {headline}")
+                print(f"[{ticker_upper}] Dropped syndicated noise: {headline}")
                 continue
                 
-            # Handle SDK's datetime object or string gracefully
             created_at_raw = getattr(item, 'created_at', None)
             if hasattr(created_at_raw, 'isoformat'):
                 pub_time_str = created_at_raw.isoformat()
             elif isinstance(created_at_raw, str):
                 try:
-                    # Parse the raw string into a structured datetime object, then convert to clean ISO
                     pub_time_str = parser.isoparse(created_at_raw).isoformat()
                 except Exception:
                     try:
@@ -93,7 +109,6 @@ class NewsService:
             return {"status": "success", "articles_inserted": 0, "message": "No valid entity-specific URLs."}
             
         try:
-            # Upsert to Supabase
             response = supabase_client.table("soc_news_articles").upsert(
                 payloads, on_conflict="url"
             ).execute()
