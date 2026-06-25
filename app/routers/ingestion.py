@@ -115,7 +115,7 @@ async def generate_research_report(ticker: str, background_tasks: BackgroundTask
 
 # --- DEEP RAG PIPELINE ---
 @router.post("/analyze/deep/{ticker}")
-async def generate_deep_research_report(ticker: str):
+async def generate_deep_research_report(ticker: str, background_tasks: BackgroundTasks):
     try:
         clear_logs(ticker)
         log_update(ticker, "Initiating DEEP RAG Pipeline...")
@@ -130,19 +130,38 @@ async def generate_deep_research_report(ticker: str):
             suggestion_text = f" Did you mean: {', '.join(suggestions)}?" if suggestions else ""
             raise HTTPException(status_code=400, detail=str(ve) + suggestion_text)
             
-        # 2. Check if the specific filing is fully processed (Only select is_ready)
+        # 2. Check if the specific filing is fully processed
         res = supabase_client.table("soc_sec_filings") \
-            .select("is_ready") \
+            .select("id, is_ready") \
             .eq("ticker", ticker.upper()) \
-            .eq("is_ready", True) \
             .execute()
         
+        # 🛡️ THE FIX: If no record exists, trigger background job!
         if not res.data:
-             log_update(ticker, "ERROR: SEC Data is missing or vectorizing. Pipeline halted.")
-             raise HTTPException(
-                 status_code=400, 
-                 detail="SEC Data is still vectorizing in the background or doesn't exist. Please wait for the 'Deep Research is Ready' status."
-             )
+            log_update(ticker, "No SEC filing record found. Launching background ingestion...")
+            background_tasks.add_task(background_sec_vectorization, ticker)
+            raise HTTPException(
+                status_code=400, 
+                detail="SEC filing initiated. Vectorization started in background. Please wait 30 seconds."
+            )
+            
+        # 🛡️ THE FIX: Auto-repair old stuck tickers that have chunks but is_ready=False
+        if not res.data[0].get("is_ready"):
+            chunk_check = supabase_client.table("soc_filing_chunks") \
+                .select("id", count='exact') \
+                .eq("ticker", ticker.upper()) \
+                .limit(1) \
+                .execute()
+                
+            if chunk_check.count and chunk_check.count > 0:
+                log_update(ticker, "Detected orphan record with existing chunks. Auto-repairing is_ready status.")
+                supabase_client.table("soc_sec_filings").update({"is_ready": True}).eq("id", res.data[0]['id']).execute()
+            else:
+                log_update(ticker, "ERROR: SEC Data is still vectorizing. Pipeline halted.")
+                raise HTTPException(
+                    status_code=400, 
+                    detail="SEC Data is still vectorizing in the background. Please wait for the 'Deep Research is Ready' status."
+                )
              
         # 3. Proceed
         result = AgentService.generate_intelligence_report(ticker, use_rag=True)
