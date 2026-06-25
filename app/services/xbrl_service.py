@@ -2,6 +2,7 @@ import requests
 from app.database import supabase_client
 from datetime import datetime
 from app.status_store import log_update
+import yfinance as yf
 
 class XBRLService:
     SEC_HEADERS = {'User-Agent': 'SocratesResearchEngine admin@socrates.com'}
