@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import requests
-from app.services.yfinance_service import YFinanceService
+from app.services.xbrl_service import XBRLService
 from app.services.news_service import NewsService
 from app.services.sec_service import SECService
 from app.services.vector_service import VectorService
@@ -83,7 +83,7 @@ async def generate_research_report(ticker: str, background_tasks: BackgroundTask
         # 1. Validate equity
         try:
             log_update(ticker, "Validating equity status...")
-            YFinanceService.fetch_and_store_fundamentals(ticker)
+            XBRLService.fetch_and_store_fundamentals(ticker)
         except ValueError as ve:
             log_update(ticker, f"Validation failed: {ve}")
             suggestions = get_ticker_suggestions(ticker)
@@ -123,7 +123,7 @@ async def generate_deep_research_report(ticker: str):
         # 1. Validate equity
         try:
             log_update(ticker, "Validating equity status...")
-            YFinanceService.fetch_and_store_fundamentals(ticker)
+            XBRLService.fetch_and_store_fundamentals(ticker)
         except ValueError as ve:
             log_update(ticker, f"Validation failed: {ve}")
             suggestions = get_ticker_suggestions(ticker)

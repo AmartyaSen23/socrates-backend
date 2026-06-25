@@ -2,7 +2,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 from app.database import supabase_client
 from app.services.news_service import NewsService
-from app.services.yfinance_service import YFinanceService
+from app.services.xbrl_service import XBRLService
 from app.services.sec_listener_service import SECListenerService
 
 def hourly_news_pull():
@@ -35,7 +35,7 @@ def daily_fundamentals_pull():
     for ticker in tickers:
         try:
             print(f"Pulling fundamentals for {ticker}...")
-            YFinanceService.fetch_and_store_fundamentals(ticker)
+            XBRLService.fetch_and_store_fundamentals(ticker)
             
             supabase_client.table("soc_watchlist").update(
                 {"last_fund_pull": datetime.utcnow().isoformat()}
