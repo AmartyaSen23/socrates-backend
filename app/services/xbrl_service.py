@@ -2,6 +2,7 @@ import requests
 from app.database import supabase_client
 from datetime import datetime
 from app.status_store import log_update
+import yfinance as yf
 
 class XBRLService:
     SEC_HEADERS = {'User-Agent': 'SocratesResearchEngine admin@socrates.com'}
@@ -77,27 +78,29 @@ class XBRLService:
             log_update(ticker_upper, f"SEC XBRL Extraction skipped (Likely Foreign Issuer).")
 
         # ==========================================
-        # PHASE 2: YAHOO CRUMB BYPASS (Deep Fallback)
+        # PHASE 2: YAHOO CRUMB BYPASS & FALLBACK
         # ==========================================
         log_update(ticker_upper, "Executing Market Valuation Crumb Handshake...")
         market_cap = None
         pe_ratio = None
 
         try:
+            # --- ATTEMPT 1: The Restored Crumb Bypass ---
             session = requests.Session()
             session.headers.update({
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
                 'Accept': '*/*'
             })
-            # Using finance.yahoo.com is more reliable for setting the primary 'A3' cookie globally
-            session.get('https://finance.yahoo.com', timeout=10)
+            
+            # Reverted to fc.yahoo.com for guaranteed cookie acquisition
+            session.get('https://fc.yahoo.com', timeout=10)
             crumb_response = session.get('https://query1.finance.yahoo.com/v1/test/getcrumb', timeout=10)
-            crumb = crumb_response.text
+            crumb = crumb_response.text.strip()
             
             if not crumb or 'html' in crumb:
-                raise ValueError("Yahoo security blockade: Failed to generate authentication crumb.")
+                raise ValueError("Failed to generate authentication crumb.")
 
-            # 2A. Shallow Quote (Market Cap, PE, Quote Type)
+            # 2A. Shallow Quote
             quote_url = f"https://query2.finance.yahoo.com/v7/finance/quote?symbols={ticker_upper}&crumb={crumb}"
             quote_response = session.get(quote_url, timeout=10)
             
@@ -113,7 +116,6 @@ class XBRLService:
                 asset_data = quote_result[0]
                 quote_type = asset_data.get("quoteType")
                 
-                # 🛡️ THE FIX: Allow "ADR" (American Depositary Receipt) for foreign tickers like INFY and WIT
                 if quote_type not in ["EQUITY", "ADR"]:
                     raise ValueError(f"'{ticker_upper}' is a {quote_type}. Socrates AI requires equities or ADRs.")
                 
@@ -122,9 +124,8 @@ class XBRLService:
                 if eps is None: 
                     eps = asset_data.get("epsTrailingTwelveMonths") or asset_data.get("trailingEps")
             
-            # 2B. Deep Financials (Revenue, Debt) - This is what we were missing!
+            # 2B. Deep Financials
             if revenue is None or total_debt is None:
-                log_update(ticker_upper, "Fetching deeper financials from Yahoo quoteSummary...")
                 summary_url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker_upper}?modules=financialData&crumb={crumb}"
                 summary_res = session.get(summary_url, timeout=10)
                 
@@ -133,21 +134,38 @@ class XBRLService:
                     res_list = summary_data.get("quoteSummary", {}).get("result", [])
                     if res_list:
                         fin_data = res_list[0].get("financialData", {})
-                        
                         if revenue is None:
                             rev_val = fin_data.get("totalRevenue", {})
                             revenue = rev_val.get("raw") if isinstance(rev_val, dict) else None
-                            
                         if total_debt is None:
                             debt_val = fin_data.get("totalDebt", {})
                             total_debt = debt_val.get("raw") if isinstance(debt_val, dict) else None
 
             log_update(ticker_upper, "Successfully bypassed security and extracted valuation/fundamentals.")
-            
-        except ValueError as ve:
-            raise ve
-        except Exception as e:
-            raise Exception(f"Valuation Engine Failed: {str(e)}")
+
+        except Exception as crumb_err:
+            # --- ATTEMPT 2: The YFinance Safety Net ---
+            log_update(ticker_upper, f"Crumb Bypass rejected ({str(crumb_err)}). Engaging yfinance safety net... Our boy Yahoo failed us 😭🙏🏻🥀💔")
+            try:
+                stock = yf.Ticker(ticker_upper)
+                info = stock.info
+                
+                if not info or "marketCap" not in info:
+                    raise ValueError("yfinance returned empty payload.")
+                    
+                quote_type = info.get("quoteType", "EQUITY")
+                if quote_type not in ["EQUITY", "ADR"]:
+                    raise ValueError(f"'{ticker_upper}' is a {quote_type}. Socrates AI requires equities or ADRs.")
+                    
+                market_cap = info.get("marketCap")
+                pe_ratio = info.get("trailingPE")
+                if eps is None: eps = info.get("trailingEps")
+                if revenue is None: revenue = info.get("totalRevenue")
+                if total_debt is None: total_debt = info.get("totalDebt")
+                
+                log_update(ticker_upper, "YFinance Fallback Success!")
+            except Exception as yf_err:
+                raise Exception(f"Valuation Engine Failed Completely. Both Crumb and YFinance blocked: {str(yf_err)} Yfinance Yet again failed us.. 🥀💔")
 
         if market_cap is None or market_cap == 0:
             raise ValueError(f"Target '{ticker_upper}' lacks structural market valuation metrics.")
@@ -158,7 +176,6 @@ class XBRLService:
         safe_revenue = int(revenue) if revenue is not None else None
         safe_market_cap = int(market_cap) if market_cap is not None else None
         safe_total_debt = int(total_debt) if total_debt is not None else None
-        # EPS and PE can remain floats
 
         payload = {
             "ticker": ticker_upper,
