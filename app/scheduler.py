@@ -7,11 +7,10 @@ from app.services.sec_listener_service import SECListenerService
 
 def hourly_news_pull():
     print(f"[{datetime.now()}] SCHEDULER: Starting hourly news pull...")
-    # 1. Fetch only the active tickers from our watchlist
+
     response = supabase_client.table("soc_watchlist").select("ticker").eq("is_active", True).execute()
     tickers = [row["ticker"] for row in response.data]
     
-    # 2. Iterate and ingest (We add a tiny delay in the service to be polite to yfinance)
     for ticker in tickers:
         try:
             print(f"Pulling news for {ticker}...")
