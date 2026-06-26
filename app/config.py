@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     groq_api_key: str
     alpaca_api_key: str
     alpaca_secret: str
+    fmp_api_key: str
 
     model_config = SettingsConfigDict(env_file=".env")
 

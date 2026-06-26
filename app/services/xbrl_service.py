@@ -2,8 +2,9 @@ import requests
 import math
 import yfinance as yf
 from app.database import supabase_client
-from datetime import datetime, timedelta
+from datetime import datetime
 from app.status_store import log_update
+from app.config import settings
 
 class XBRLService:
     # Official SEC User-Agent requirement
@@ -24,7 +25,7 @@ class XBRLService:
 
     @staticmethod
     def extract_latest_fact(company_facts: dict, possible_tags: list) -> float:
-        # DYNAMIC UPGRADE: Handle US Domestic (us-gaap) and International ADRs (ifrs-full)
+        # Supports both US Domestic (us-gaap) and International ADRs like INFY (ifrs-full)
         accounting_standards = ['us-gaap', 'ifrs-full']
         
         for standard in accounting_standards:
@@ -35,16 +36,15 @@ class XBRLService:
             for tag in possible_tags:
                 if tag in taxonomy:
                     units = taxonomy[tag].get('units', {})
-                    # Grab USD if available, otherwise take the first reported currency unit
-                    val_key = 'USD' if 'USD' in units else list(units.keys())[0] if units else None
+                    if not units:
+                        continue
+                    val_key = 'USD' if 'USD' in units else list(units.keys())[0]
                     
-                    if val_key:
-                        observations = units[val_key]
-                        valid_obs = [obs for obs in observations if 'val' in obs and 'filed' in obs]
-                        if valid_obs:
-                            # Sort by filed date to ensure we grab the absolute latest audited number
-                            latest_obs = sorted(valid_obs, key=lambda x: x['filed'], reverse=True)[0]
-                            return float(latest_obs['val'])
+                    observations = units[val_key]
+                    valid_obs = [obs for obs in observations if 'val' in obs and 'filed' in obs]
+                    if valid_obs:
+                        latest_obs = sorted(valid_obs, key=lambda x: x['filed'], reverse=True)[0]
+                        return float(latest_obs['val'])
         return None
 
     @staticmethod
@@ -91,68 +91,56 @@ class XBRLService:
             log_update(ticker_upper, f"SEC XBRL Extraction skipped (Likely Foreign ADR).")
 
         # ==========================================
-        # PHASE 2 & 3: THE VALUATION WATERFALL
+        # PHASE 2: REAL-TIME VALUATION (FMP ENGINE)
         # ==========================================
-        log_update(ticker_upper, "Initiating dynamic valuation waterfall...")
+        log_update(ticker_upper, "Fetching live market data via Financial Modeling Prep (FMP)...")
         market_cap = None
         pe_ratio = None
         current_price = None
+ 
 
-        # Best practice: Pull this from os.environ
-        FINNHUB_API_KEY = "your_free_finnhub_api_key"
-
-        # --- BLOCK A: FINNHUB PRIMARY API ---
+        # --- LAYER A: FMP REST API ---
         try:
-            # 1. Quote Endpoint (Live Price)
-            quote_res = requests.get(f"https://finnhub.io/api/v1/quote?symbol={ticker_upper}&token={FINNHUB_API_KEY}", timeout=5)
-            if quote_res.status_code == 200:
-                q_data = quote_res.json()
-                if q_data.get('c') and float(q_data['c']) > 0:
-                    current_price = float(q_data['c'])
-
-            # 2. Profile2 Endpoint (Rock-Solid Market Cap & Shares Outstanding)
-            shares_outstanding = None
-            profile_res = requests.get(f"https://finnhub.io/api/v1/stock/profile2?symbol={ticker_upper}&token={FINNHUB_API_KEY}", timeout=5)
-            if profile_res.status_code == 200:
-                p_data = profile_res.json()
-                if p_data.get('marketCapitalization'):
-                    market_cap = float(p_data['marketCapitalization']) * 1000000
-                if p_data.get('shareOutstanding'):
-                    shares_outstanding = float(p_data['shareOutstanding']) * 1000000
-
-            # 3. Metric Endpoint (For PE and EPS)
-            metric_res = requests.get(f"https://finnhub.io/api/v1/stock/metric?symbol={ticker_upper}&metric=all&token={FINNHUB_API_KEY}", timeout=5)
-            if metric_res.status_code == 200:
-                m_data = metric_res.json().get('metric', {})
-                pe_ratio = m_data.get('peTTM')
-                if eps is None:
-                    eps = m_data.get('epsTTM')
+            fmp_url = f"https://financialmodelingprep.com/api/v3/quote/{ticker_upper}?apikey={settings.fmp_api_key}"
+            res = requests.get(fmp_url, timeout=10)
+            
+            if res.status_code == 200:
+                data_list = res.json()
+                if data_list and len(data_list) > 0:
+                    fmp_data = data_list[0]
+                    current_price = fmp_data.get('price')
+                    market_cap = fmp_data.get('marketCap')
+                    pe_ratio = fmp_data.get('pe')
                     
+                    # Clean backfill for EPS if SEC data had holes
+                    if eps is None: 
+                        eps = fmp_data.get('eps')
+                        
+                    log_update(ticker_upper, "Successfully extracted live valuation from FMP.")
+                else:
+                    log_update(ticker_upper, f"Warning: FMP returned empty array for {ticker_upper}.")
+            else:
+                log_update(ticker_upper, f"FMP API Error: Status {res.status_code} - {res.text}")
         except Exception as e:
-            log_update(ticker_upper, f"Finnhub primary fetch encountered an issue: {e}")
+            log_update(ticker_upper, f"FMP Engine exception: {e}")
 
-        # --- BLOCK B: YFINANCE SILENT FALLBACK ---
+        # --- LAYER B: BRITTLE-BUT-SAFE SCRAPING FALLBACK ---
+        # If FMP is out of credits or blocks, we fallback to scraping live metrics directly
         if market_cap is None or current_price is None:
-            log_update(ticker_upper, "Finnhub missed structural data. Cascading to yfinance fallback...")
+            log_update(ticker_upper, "FMP metrics unavailable. Attempting isolated yfinance fallback...")
             try:
                 stock = yf.Ticker(ticker_upper)
                 fast = stock.fast_info
-                if current_price is None:
-                    current_price = getattr(fast, 'last_price', getattr(fast, 'previous_close', None))
-                if market_cap is None:
-                    market_cap = getattr(fast, 'market_cap', None)
+                if current_price is None: current_price = getattr(fast, 'last_price', None)
+                if market_cap is None: market_cap = getattr(fast, 'market_cap', None)
             except Exception:
                 pass
 
-        # --- BLOCK C: MATHEMATICAL RECONSTRUCTION ---
-        if market_cap is None and current_price is not None and shares_outstanding is not None:
-            log_update(ticker_upper, "Cascading to Math Reconstruction: Price * Shares...")
-            market_cap = current_price * shares_outstanding
-
+        # --- LAYER C: MATH DERIVATION ---
         if pe_ratio is None and current_price and eps and float(eps) > 0:
             pe_ratio = current_price / float(eps)
 
-        # Final Hard Validation
+        # Hard validation checkpoint
         if market_cap is None or (isinstance(market_cap, float) and math.isnan(market_cap)):
             raise ValueError(f"Target '{ticker_upper}' lacks structural market valuation metrics after all fallbacks.")
         # ==========================================
