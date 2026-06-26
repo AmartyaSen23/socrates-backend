@@ -1,41 +1,10 @@
 import requests
 import math
-import yfinance as yf
 from app.database import supabase_client
-from datetime import datetime, timedelta
+from datetime import datetime
 from app.status_store import log_update
 
 class XBRLService:
-    # Official SEC User-Agent requirement
-    SEC_HEADERS = {'User-Agent': 'SocratesResearchEngine admin@socrates.com'}
-
-    @staticmethod
-    def get_cik_from_ticker(ticker: str) -> str:
-        url = "https://www.sec.gov/files/company_tickers.json"
-        response = requests.get(url, headers=XBRLService.SEC_HEADERS, timeout=10)
-        if response.status_code != 200:
-            raise ValueError("Failed to fetch SEC CIK mapping.")
-            
-        data = response.json()
-        for key, company in data.items():
-            if company['ticker'] == ticker:
-                return str(company['cik_str']).zfill(10)
-        raise ValueError(f"Ticker '{ticker}' not found in SEC EDGAR database.")
-
-    @staticmethod
-    def extract_latest_fact(company_facts: dict, possible_tags: list) -> float:
-        us_gaap = company_facts.get('facts', {}).get('us-gaap', {})
-        for tag in possible_tags:
-            if tag in us_gaap:
-                units = us_gaap[tag].get('units', {})
-                if 'USD' in units:
-                    observations = units['USD']
-                    valid_obs = [obs for obs in observations if 'val' in obs and 'filed' in obs]
-                    if valid_obs:
-                        latest_obs = sorted(valid_obs, key=lambda x: x['filed'], reverse=True)[0]
-                        return float(latest_obs['val'])
-        return None
-
     @staticmethod
     def fetch_and_store_fundamentals(ticker: str):
         ticker_upper = ticker.upper()
@@ -53,101 +22,87 @@ class XBRLService:
                 log_update(ticker_upper, "Fundamentals exist in cache. Skipping API.")
                 return cached_data.data
         except Exception as e:
-            print(f"Cache check failed: {e}")
+            pass
 
-        # ==========================================
-        # PHASE 1: SEC EDGAR XBRL (The Official Way)
-        # ==========================================
-        log_update(ticker_upper, "Fetching audited accounting metrics from SEC EDGAR XBRL...")
-        revenue = None
-        eps = None
-        total_debt = None
-        
-        try:
-            cik = XBRLService.get_cik_from_ticker(ticker_upper)
-            facts_url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
-            facts_res = requests.get(facts_url, headers=XBRLService.SEC_HEADERS, timeout=10)
-            
-            if facts_res.status_code == 200:
-                facts_data = facts_res.json()
-                revenue = XBRLService.extract_latest_fact(facts_data, ['Revenues', 'SalesRevenueNet', 'RevenueFromContractWithCustomerExcludingAssessedTax'])
-                eps = XBRLService.extract_latest_fact(facts_data, ['EarningsPerShareBasic', 'EarningsPerShareDiluted'])
-                total_debt = XBRLService.extract_latest_fact(facts_data, ['LongTermDebt', 'DebtCurrent', 'LongTermDebtAndCapitalLeaseObligations'])
-                log_update(ticker_upper, f"SEC XBRL Extraction Success.")
-            else:
-                log_update(ticker_upper, f"Warning: SEC XBRL returned status {facts_res.status_code}.")
-        except Exception as e:
-            log_update(ticker_upper, f"SEC XBRL Extraction skipped (Likely Foreign ADR).")
-
-        # ==========================================
-        # PHASE 2: STANDARD YFINANCE FAST_INFO
-        # ==========================================
-        log_update(ticker_upper, "Fetching live market data via yfinance fast_info...")
-        market_cap = None
-        pe_ratio = None
-        current_price = None
+        log_update(ticker_upper, "Engaging Global Institutional Scanner (TradingView Protocol)...")
 
         try:
-            stock = yf.Ticker(ticker_upper)
+            # ==========================================
+            # STEP 1: RESOLVE GLOBAL EXCHANGE
+            # ==========================================
+            search_url = f"https://symbol-search.tradingview.com/symbol_search/v3/?text={ticker_upper}&hl=1&type=stock"
+            search_res = requests.get(search_url, timeout=10)
             
-            # --- LAYER 1: Object/Dict agnostic fast_info extraction ---
-            try:
-                fast = stock.fast_info
-                # Attempt attribute access (newer yfinance)
-                market_cap = getattr(fast, 'market_cap', None)
-                current_price = getattr(fast, 'last_price', None)
+            if search_res.status_code != 200:
+                raise ValueError("Failed to reach Global Search API.")
                 
-                # Attempt dict access (older yfinance) if attributes were missing
-                if market_cap is None and hasattr(fast, 'get'):
-                    market_cap = fast.get('market_cap', fast.get('marketCap'))
-                if current_price is None and hasattr(fast, 'get'):
-                    current_price = fast.get('last_price', fast.get('regularMarketPrice'))
-            except Exception:
-                pass
+            results = search_res.json()
+            if not results:
+                raise ValueError(f"Ticker '{ticker_upper}' not found on any global exchange.")
+            
+            # Grab the top match to get the exact Exchange and Country
+            best_match = results[0]
+            exchange = best_match.get("exchange")
+            symbol = best_match.get("symbol")
+            country = best_match.get("country", "US").lower()
+            
+            tv_ticker = f"{exchange}:{symbol}"
+            log_update(ticker_upper, f"Resolved to Global Exchange: {tv_ticker} ({country.upper()})")
 
-            # --- LAYER 2: Try grabbing standard .info for missing gaps ---
-            try:
-                info = stock.info
-                if market_cap is None: market_cap = info.get("marketCap")
-                if current_price is None: current_price = info.get("currentPrice", info.get("regularMarketPrice"))
-                if revenue is None: revenue = info.get("totalRevenue")
-                if eps is None: eps = info.get("trailingEps")
-                if total_debt is None: total_debt = info.get("totalDebt")
-                if pe_ratio is None: pe_ratio = info.get("trailingPE")
-            except Exception:
-                log_update(ticker_upper, "Note: Standard .info dictionary was blocked by Yahoo.")
+            # Map the country to TradingView's regional scanner clusters
+            region_map = {
+                "us": "america",
+                "in": "india",
+                "uk": "uk",
+                "ca": "canada",
+                "au": "australia",
+                "cn": "china",
+                "jp": "japan",
+                "de": "germany",
+                "fr": "france"
+            }
+            region = region_map.get(country, "america") # Fallback to america
 
-            # --- LAYER 3: The Ultimate Bulletproof Fallback (Mathematical Reconstruction) ---
-            if current_price is None or (isinstance(current_price, float) and math.isnan(current_price)):
-                try:
-                    hist = stock.history(period="5d")
-                    if not hist.empty:
-                        current_price = float(hist['Close'].iloc[-1])
-                except Exception:
-                    pass
-
-            if market_cap is None or (isinstance(market_cap, float) and math.isnan(market_cap)):
-                try:
-                    start_date = (datetime.today() - timedelta(days=30)).strftime('%Y-%m-%d')
-                    shares = stock.get_shares_full(start=start_date, end=today)
-                    if shares is not None and not shares.empty and current_price:
-                        market_cap = current_price * float(shares.iloc[-1])
-                        log_update(ticker_upper, "Market Cap mathematically reconstructed via shares outstanding!")
-                except Exception:
-                    pass
-
-            # Calculate P/E mathematically if Yahoo hid it!
-            if pe_ratio is None and current_price and eps and eps > 0:
-                pe_ratio = current_price / eps
+            # ==========================================
+            # STEP 2: RIP EXACT FUNDAMENTALS
+            # ==========================================
+            scanner_url = f"https://scanner.tradingview.com/{region}/scan"
+            payload = {
+                "symbols": {"tickers": [tv_ticker]},
+                "columns": [
+                    "market_cap_basic", 
+                    "price_earnings_ttm", 
+                    "earnings_per_share_basic_ttm", 
+                    "total_revenue", 
+                    "total_debt"
+                ]
+            }
+            
+            scan_res = requests.post(scanner_url, json=payload, timeout=10)
+            
+            if scan_res.status_code != 200:
+                raise ValueError("Scanner rejected the data request.")
                 
-            log_update(ticker_upper, "Successfully extracted valuation using standard APIs.")
+            scan_data = scan_res.json().get("data", [])
+            if not scan_data:
+                raise ValueError(f"No fundamental data published for {tv_ticker}.")
+                
+            # Extract the 5 data points
+            metrics = scan_data[0].get("d", [])
+            
+            market_cap = metrics[0]
+            pe_ratio = metrics[1]
+            eps = metrics[2]
+            revenue = metrics[3]
+            total_debt = metrics[4]
+
+            if not market_cap:
+                raise ValueError(f"Target '{ticker_upper}' lacks structural market valuation metrics.")
+
+            log_update(ticker_upper, "Successfully extracted audited global fundamentals.")
 
         except Exception as e:
-            raise Exception(f"Standard Valuation Engine Failed: {str(e)}")
-
-        # Hard validation checkpoint
-        if market_cap is None or (isinstance(market_cap, float) and math.isnan(market_cap)):
-            raise ValueError(f"Target '{ticker_upper}' lacks structural market valuation metrics.")
+            raise Exception(f"Valuation Engine Failed: {str(e)}")
 
         # ==========================================
         # PHASE 3: SAFE TYPE CASTING & SUPABASE INJECT
@@ -168,9 +123,9 @@ class XBRLService:
         }
         
         try:
-            db_response = supabase_client.table("soc_company_fundamentals").upsert(
+            supabase_client.table("soc_company_fundamentals").upsert(
                 payload, on_conflict="ticker, fiscal_date"
             ).execute()
-            return db_response.data
+            return payload
         except Exception as e:
             raise Exception(f"Supabase Database Error: {str(e)}")
