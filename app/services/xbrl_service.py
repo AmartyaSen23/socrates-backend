@@ -1,8 +1,8 @@
 import requests
+import re
 from app.database import supabase_client
 from datetime import datetime
 from app.status_store import log_update
-import yfinance as yf
 
 class XBRLService:
     SEC_HEADERS = {'User-Agent': 'SocratesResearchEngine admin@socrates.com'}
@@ -32,6 +32,24 @@ class XBRLService:
                     if valid_obs:
                         latest_obs = sorted(valid_obs, key=lambda x: x['filed'], reverse=True)[0]
                         return float(latest_obs['val'])
+        return None
+
+    @staticmethod
+    def _rip_html_metric(html_text: str, json_keys: list, streamer_key: str, is_float: bool = False):
+        """Rips exact metrics out of Yahoo's raw HTML DOM and Next.js hydration states."""
+        # 1. Search the hidden JSON state
+        for key in json_keys:
+            match = re.search(rf'"{key}":\{{"raw":([\d\.\-]+)', html_text)
+            if match:
+                val = float(match.group(1))
+                return val if is_float else int(val)
+                
+        # 2. Search the live fin-streamer tags as a backup
+        if streamer_key:
+            match = re.search(rf'data-field="{streamer_key}"[^>]*value="([\d\.\-]+)"', html_text)
+            if match:
+                val = float(match.group(1))
+                return val if is_float else int(val)
         return None
 
     @staticmethod
@@ -75,100 +93,57 @@ class XBRLService:
             else:
                 log_update(ticker_upper, f"Warning: SEC XBRL returned status {facts_res.status_code}.")
         except Exception as e:
-            log_update(ticker_upper, f"SEC XBRL Extraction skipped (Likely Foreign Issuer).")
+            log_update(ticker_upper, f"SEC XBRL Extraction skipped (Likely Foreign Issuer like ADR).")
 
         # ==========================================
-        # PHASE 2: YAHOO CRUMB BYPASS & FALLBACK
+        # PHASE 2: STEALTH HTML RIPPER (No APIs, No Crumbs)
         # ==========================================
-        log_update(ticker_upper, "Executing Market Valuation Crumb Handshake...")
-        market_cap = None
-        pe_ratio = None
-
+        log_update(ticker_upper, "Bypassing Yahoo APIs. Engaging direct HTML Data Ripper...")
+        
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9'
+        })
+        
         try:
-            # --- ATTEMPT 1: The Restored Crumb Bypass ---
-            session = requests.Session()
-            session.headers.update({
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-                'Accept': '*/*'
-            })
+            # We hit the main webpage. They can't block this without killing their SEO.
+            html_res = session.get(f'https://finance.yahoo.com/quote/{ticker_upper}', timeout=15)
             
-            # Reverted to fc.yahoo.com for guaranteed cookie acquisition
-            session.get('https://fc.yahoo.com', timeout=10)
-            crumb_response = session.get('https://query1.finance.yahoo.com/v1/test/getcrumb', timeout=10)
-            crumb = crumb_response.text.strip()
+            if html_res.status_code != 200:
+                raise ValueError(f"Yahoo HTML page blocked. Status Code: {html_res.status_code}")
+                
+            html_text = html_res.text
             
-            if not crumb or 'html' in crumb:
-                raise ValueError("Failed to generate authentication crumb.")
+            # 1. Validate Equity Type from HTML
+            q_type_match = re.search(r'"quoteType":"([^"]+)"', html_text)
+            if q_type_match:
+                q_type = q_type_match.group(1)
+                if q_type not in ["EQUITY", "ADR"]:
+                    raise ValueError(f"'{ticker_upper}' is a {q_type}. Socrates AI requires equities or ADRs.")
 
-            # 2A. Shallow Quote
-            quote_url = f"https://query2.finance.yahoo.com/v7/finance/quote?symbols={ticker_upper}&crumb={crumb}"
-            quote_response = session.get(quote_url, timeout=10)
+            # 2. Rip Valuation Data
+            market_cap = XBRLService._rip_html_metric(html_text, ["marketCap"], "marketCap", False)
+            pe_ratio = XBRLService._rip_html_metric(html_text, ["trailingPE"], "trailingPE", True)
             
-            if quote_response.status_code == 401:
-                raise ValueError("Yahoo API returned 401 Unauthorized. Crumb was rejected.")
-            
-            if quote_response.status_code == 200:
-                data = quote_response.json()
-                quote_result = data.get("quoteResponse", {}).get("result", [])
-                if not quote_result:
-                    raise ValueError(f"No market equity data returned for target '{ticker_upper}'")
-                
-                asset_data = quote_result[0]
-                quote_type = asset_data.get("quoteType")
-                
-                if quote_type not in ["EQUITY", "ADR"]:
-                    raise ValueError(f"'{ticker_upper}' is a {quote_type}. Socrates AI requires equities or ADRs.")
-                
-                market_cap = asset_data.get("marketCap")
-                pe_ratio = asset_data.get("trailingPE")
-                if eps is None: 
-                    eps = asset_data.get("epsTrailingTwelveMonths") or asset_data.get("trailingEps")
-            
-            # 2B. Deep Financials
-            if revenue is None or total_debt is None:
-                summary_url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker_upper}?modules=financialData&crumb={crumb}"
-                summary_res = session.get(summary_url, timeout=10)
-                
-                if summary_res.status_code == 200:
-                    summary_data = summary_res.json()
-                    res_list = summary_data.get("quoteSummary", {}).get("result", [])
-                    if res_list:
-                        fin_data = res_list[0].get("financialData", {})
-                        if revenue is None:
-                            rev_val = fin_data.get("totalRevenue", {})
-                            revenue = rev_val.get("raw") if isinstance(rev_val, dict) else None
-                        if total_debt is None:
-                            debt_val = fin_data.get("totalDebt", {})
-                            total_debt = debt_val.get("raw") if isinstance(debt_val, dict) else None
+            # 3. Rip Fundamentals (Only override if SEC XBRL failed for foreign tickers)
+            if eps is None:
+                eps = XBRLService._rip_html_metric(html_text, ["trailingEps", "epsTrailingTwelveMonths"], "epsTrailingTwelveMonths", True)
+            if revenue is None:
+                revenue = XBRLService._rip_html_metric(html_text, ["totalRevenue"], "totalRevenue", False)
+            if total_debt is None:
+                total_debt = XBRLService._rip_html_metric(html_text, ["totalDebt"], "totalDebt", False)
 
-            log_update(ticker_upper, "Successfully bypassed security and extracted valuation/fundamentals.")
-
-        except Exception as crumb_err:
-            # --- ATTEMPT 2: The YFinance Safety Net ---
-            log_update(ticker_upper, f"Crumb Bypass rejected ({str(crumb_err)}). Engaging yfinance safety net... Our boy Yahoo failed us 😭🙏🏻🥀💔")
-            try:
-                stock = yf.Ticker(ticker_upper)
-                info = stock.info
+            if market_cap is None:
+                raise ValueError(f"Target '{ticker_upper}' lacks structural market valuation metrics in HTML payload.")
                 
-                if not info or "marketCap" not in info:
-                    raise ValueError("yfinance returned empty payload.")
-                    
-                quote_type = info.get("quoteType", "EQUITY")
-                if quote_type not in ["EQUITY", "ADR"]:
-                    raise ValueError(f"'{ticker_upper}' is a {quote_type}. Socrates AI requires equities or ADRs.")
-                    
-                market_cap = info.get("marketCap")
-                pe_ratio = info.get("trailingPE")
-                if eps is None: eps = info.get("trailingEps")
-                if revenue is None: revenue = info.get("totalRevenue")
-                if total_debt is None: total_debt = info.get("totalDebt")
-                
-                log_update(ticker_upper, "YFinance Fallback Success!")
-            except Exception as yf_err:
-                raise Exception(f"Valuation Engine Failed Completely. Both Crumb and YFinance blocked: {str(yf_err)} Yfinance Yet again failed us.. 🥀💔")
+            log_update(ticker_upper, "HTML Rip Successful. Matrix data extracted flawlessly.")
 
-        if market_cap is None or market_cap == 0:
-            raise ValueError(f"Target '{ticker_upper}' lacks structural market valuation metrics.")
+        except ValueError as ve:
+            raise ve
+        except Exception as e:
+            raise Exception(f"HTML Ripper Engine Failed: {str(e)}")
 
         # ==========================================
         # PHASE 3: SAFE TYPE CASTING & SUPABASE INJECT
