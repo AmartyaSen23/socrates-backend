@@ -98,29 +98,27 @@ class XBRLService:
         pe_ratio = None
         current_price = None
 
-        FMP_API_KEY = "your_free_fmp_api_key" 
 
         # --- LAYER A: FMP PROFILE ENDPOINT (Bypassing the Legacy Quote Paywall) ---
-        if FMP_API_KEY and FMP_API_KEY != "your_free_fmp_api_key":
-            try:
-                # The /profile/ endpoint is still accessible on the free tier
-                fmp_url = f"https://financialmodelingprep.com/api/v3/profile/{ticker_upper}?apikey={FMP_API_KEY}"
-                res = requests.get(fmp_url, timeout=10)
-                
-                if res.status_code == 200:
-                    data_list = res.json()
-                    if data_list and len(data_list) > 0:
-                        fmp_data = data_list[0]
-                        current_price = fmp_data.get('price')
-                        market_cap = fmp_data.get('mktCap')
-                        
-                        log_update(ticker_upper, "Successfully extracted live valuation from FMP Profile.")
-                    else:
-                        log_update(ticker_upper, f"Warning: FMP returned empty profile for {ticker_upper}.")
+        try:
+            # The /profile/ endpoint is still accessible on the free tier
+            fmp_url = f"https://financialmodelingprep.com/api/v3/profile/{ticker_upper}?apikey={settings.fmp_api_key}"
+            res = requests.get(fmp_url, timeout=10)
+            
+            if res.status_code == 200:
+                data_list = res.json()
+                if data_list and len(data_list) > 0:
+                    fmp_data = data_list[0]
+                    current_price = fmp_data.get('price')
+                    market_cap = fmp_data.get('mktCap')
+                    
+                    log_update(ticker_upper, "Successfully extracted live valuation from FMP Profile.")
                 else:
-                    log_update(ticker_upper, f"FMP API Error: Status {res.status_code} - {res.text}")
-            except Exception as e:
-                log_update(ticker_upper, f"FMP Engine exception: {e}")
+                    log_update(ticker_upper, f"Warning: FMP returned empty profile for {ticker_upper}.")
+            else:
+                log_update(ticker_upper, f"FMP API Error: Status {res.status_code} - {res.text}")
+        except Exception as e:
+            log_update(ticker_upper, f"FMP Engine exception: {e}")
 
         # --- LAYER B: YFINANCE ARMORED FALLBACK (Bypassing fast_info bans) ---
         if market_cap is None or current_price is None:
