@@ -128,7 +128,7 @@ class XBRLService:
                 if profile_res.status_code == 200:
                     p_data = profile_res.json()
                     if p_data.get('marketCapitalization'):
-                        market_cap = float(p_data['marketCapitalization']) * 1,000,000
+                        market_cap = float(p_data['marketCapitalization']) * 1_000_000
                 
                 if current_price and market_cap:
                     log_update(ticker_upper, "Successfully extracted valuation from Finnhub.")
