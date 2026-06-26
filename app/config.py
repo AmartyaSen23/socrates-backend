@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     alpaca_api_key: str
     alpaca_secret: str
     fmp_api_key: str
+    finnhub_api_key: str
+    polygon_api_key: str
 
     model_config = SettingsConfigDict(env_file=".env")
 

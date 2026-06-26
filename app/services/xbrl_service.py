@@ -91,64 +91,88 @@ class XBRLService:
             log_update(ticker_upper, f"SEC XBRL Extraction skipped (Likely Foreign ADR).")
 
         # ==========================================
-        # PHASE 2: REAL-TIME VALUATION (ANTI-BLOCK UPGRADE)
+        # PHASE 2: REAL-TIME VALUATION (AUTHENTICATED ONLY)
         # ==========================================
         log_update(ticker_upper, "Fetching live market data...")
         market_cap = None
         pe_ratio = None
         current_price = None
 
+        # Fetch keys cleanly from your existing settings configuration
+        FMP_API_KEY = getattr(settings, "FMP_API_KEY", None)
+        FINNHUB_API_KEY = getattr(settings, "FINNHUB_API_KEY", None)
+        POLYGON_API_KEY = getattr(settings, "POLYGON_API_KEY", None)
 
-        # --- LAYER A: FMP PROFILE ENDPOINT (Bypassing the Legacy Quote Paywall) ---
-        try:
-            # The /profile/ endpoint is still accessible on the free tier
-            fmp_url = f"https://financialmodelingprep.com/api/v3/profile/{ticker_upper}?apikey={settings.fmp_api_key}"
-            res = requests.get(fmp_url, timeout=10)
-            
-            if res.status_code == 200:
-                data_list = res.json()
-                if data_list and len(data_list) > 0:
-                    fmp_data = data_list[0]
-                    current_price = fmp_data.get('price')
-                    market_cap = fmp_data.get('mktCap')
-                    
-                    log_update(ticker_upper, "Successfully extracted live valuation from FMP Profile.")
-                else:
-                    log_update(ticker_upper, f"Warning: FMP returned empty profile for {ticker_upper}.")
-            else:
-                log_update(ticker_upper, f"FMP API Error: Status {res.status_code} - {res.text}")
-        except Exception as e:
-            log_update(ticker_upper, f"FMP Engine exception: {e}")
-
-        # --- LAYER B: YFINANCE ARMORED FALLBACK (Bypassing fast_info bans) ---
-        if market_cap is None or current_price is None:
-            log_update(ticker_upper, "FMP failed. Triggering armored yfinance fallback...")
+        # --- LAYER A: FMP PROFILE ENDPOINT ---
+        if FMP_API_KEY and FMP_API_KEY != "your_free_fmp_api_key":
             try:
-                stock = yf.Ticker(ticker_upper)
-                
-                # 1. Evade IP blocks by using standard history routing
-                if current_price is None:
-                    hist = stock.history(period="1d")
-                    if not hist.empty:
-                        current_price = float(hist['Close'].iloc[-1])
-                
-                # 2. Pull structural market cap from the core info dictionary
-                if market_cap is None:
-                    info = stock.info
-                    market_cap = info.get('marketCap')
-                    
-                if current_price and market_cap:
-                    log_update(ticker_upper, "yfinance fallback successful.")
+                fmp_url = f"https://financialmodelingprep.com/api/v3/profile/{ticker_upper}?apikey={FMP_API_KEY}"
+                res = requests.get(fmp_url, timeout=5)
+                if res.status_code == 200:
+                    data_list = res.json()
+                    if data_list:
+                        current_price = data_list[0].get('price')
+                        market_cap = data_list[0].get('mktCap')
+                        log_update(ticker_upper, "Successfully extracted valuation from FMP Profile.")
+                else:
+                    log_update(ticker_upper, f"FMP Profile failed: Status {res.status_code}")
             except Exception as e:
-                log_update(ticker_upper, f"yfinance fallback completely rejected: {e}")
+                log_update(ticker_upper, f"FMP Engine exception: {e}")
 
-        # --- LAYER C: MATH DERIVATION & RECONSTRUCTION ---
+        # --- LAYER B: FINNHUB AUTHENTICATED FALLBACK (Safe from Cloud Blocks) ---
+        if market_cap is None or current_price is None:
+            if FINNHUB_API_KEY and FINNHUB_API_KEY != "your_free_finnhub_api_key":
+                log_update(ticker_upper, "FMP unavailable. Switching to Finnhub Authenticated Gateway...")
+                try:
+                    # 1. Fetch live price safely from Quote endpoint
+                    quote_res = requests.get(f"https://finnhub.io/api/v1/quote?symbol={ticker_upper}&token={FINNHUB_API_KEY}", timeout=5)
+                    if quote_res.status_code == 200:
+                        q_data = quote_res.json()
+                        if q_data.get('c'):
+                            current_price = float(q_data['c'])
+
+                    # 2. Fetch market cap safely from Profile2 endpoint
+                    profile_res = requests.get(f"https://finnhub.io/api/v1/stock/profile2?symbol={ticker_upper}&token={FINNHUB_API_KEY}", timeout=5)
+                    if profile_res.status_code == 200:
+                        p_data = profile_res.json()
+                        if p_data.get('marketCapitalization'):
+                            market_cap = float(p_data['marketCapitalization']) * 1,000,000
+                    
+                    if current_price and market_cap:
+                        log_update(ticker_upper, "Successfully extracted valuation from Finnhub.")
+                except Exception as e:
+                    log_update(ticker_upper, f"Finnhub fallback exception: {e}")
+
+        # --- LAYER C: POLYGON.IO EMERGENCY AUTHENTICATED FALLBACK ---
+        # Polygon offers 5 free API calls/min, immune to cloud IP blocks because it uses an explicit key.
+        if market_cap is None or current_price is None:
+            if POLYGON_API_KEY:
+                log_update(ticker_upper, "Cascading to Polygon.io Emergency Gateway...")
+                try:
+                    poly_url = f"https://api.polygon.io/v2/aggs/ticker/{ticker_upper}/prev?adjusted=true&apiKey={POLYGON_API_KEY}"
+                    poly_res = requests.get(poly_url, timeout=5)
+                    if poly_res.status_code == 200:
+                        results = poly_res.json().get('results', [])
+                        if results:
+                            current_price = float(results[0].get('c')) # Close price of previous day
+                            
+                            # If we have price but no market cap, pull tickers details
+                            ticker_url = f"https://api.polygon.io/v3/reference/tickers/{ticker_upper}?apiKey={POLYGON_API_KEY}"
+                            t_res = requests.get(ticker_url, timeout=5)
+                            if t_res.status_code == 200:
+                                market_cap = t_res.json().get('results', {}).get('market_cap')
+                                log_update(ticker_upper, "Successfully extracted valuation from Polygon.")
+                except Exception as e:
+                    log_update(ticker_upper, f"Polygon emergency fallback failed: {e}")
+
+        # --- LAYER D: MATH DERIVATION ---
         if pe_ratio is None and current_price and eps and float(eps) > 0:
             pe_ratio = current_price / float(eps)
+            log_update(ticker_upper, f"Using Math since pe_ratio is None, pe_ratio=current_price/float(eps)")
 
         # Final Hard Validation
         if market_cap is None or (isinstance(market_cap, float) and math.isnan(market_cap)):
-            raise ValueError(f"Target '{ticker_upper}' lacks structural market valuation metrics after all fallbacks.")
+            raise ValueError(f"Target '{ticker_upper}' lacks structural market valuation metrics after all authenticated fallbacks.")
         # ==========================================
         # PHASE 3: SAFE TYPE CASTING & SUPABASE INJECT
         # ==========================================
