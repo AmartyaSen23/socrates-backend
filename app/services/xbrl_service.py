@@ -1,10 +1,41 @@
 import requests
 import math
+import yfinance as yf
 from app.database import supabase_client
-from datetime import datetime
+from datetime import datetime, timedelta
 from app.status_store import log_update
 
 class XBRLService:
+    # Official SEC User-Agent requirement
+    SEC_HEADERS = {'User-Agent': 'SocratesResearchEngine admin@socrates.com'}
+
+    @staticmethod
+    def get_cik_from_ticker(ticker: str) -> str:
+        url = "https://www.sec.gov/files/company_tickers.json"
+        response = requests.get(url, headers=XBRLService.SEC_HEADERS, timeout=10)
+        if response.status_code != 200:
+            raise ValueError("Failed to fetch SEC CIK mapping.")
+            
+        data = response.json()
+        for key, company in data.items():
+            if company['ticker'] == ticker:
+                return str(company['cik_str']).zfill(10)
+        raise ValueError(f"Ticker '{ticker}' not found in SEC EDGAR database.")
+
+    @staticmethod
+    def extract_latest_fact(company_facts: dict, possible_tags: list) -> float:
+        us_gaap = company_facts.get('facts', {}).get('us-gaap', {})
+        for tag in possible_tags:
+            if tag in us_gaap:
+                units = us_gaap[tag].get('units', {})
+                if 'USD' in units:
+                    observations = units['USD']
+                    valid_obs = [obs for obs in observations if 'val' in obs and 'filed' in obs]
+                    if valid_obs:
+                        latest_obs = sorted(valid_obs, key=lambda x: x['filed'], reverse=True)[0]
+                        return float(latest_obs['val'])
+        return None
+
     @staticmethod
     def fetch_and_store_fundamentals(ticker: str):
         ticker_upper = ticker.upper()
@@ -22,97 +53,84 @@ class XBRLService:
                 log_update(ticker_upper, "Fundamentals exist in cache. Skipping API.")
                 return cached_data.data
         except Exception as e:
-            pass
+            print(f"Cache check failed: {e}")
 
-        log_update(ticker_upper, "Engaging Global Institutional Scanner (TradingView Protocol)...")
+        # ==========================================
+        # PHASE 1: SEC EDGAR XBRL (The Official Way)
+        # ==========================================
+        log_update(ticker_upper, "Fetching audited accounting metrics from SEC EDGAR XBRL...")
+        revenue = None
+        eps = None
+        total_debt = None
+        
+        try:
+            cik = XBRLService.get_cik_from_ticker(ticker_upper)
+            facts_url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+            facts_res = requests.get(facts_url, headers=XBRLService.SEC_HEADERS, timeout=10)
+            
+            if facts_res.status_code == 200:
+                facts_data = facts_res.json()
+                revenue = XBRLService.extract_latest_fact(facts_data, ['Revenues', 'SalesRevenueNet', 'RevenueFromContractWithCustomerExcludingAssessedTax'])
+                eps = XBRLService.extract_latest_fact(facts_data, ['EarningsPerShareBasic', 'EarningsPerShareDiluted'])
+                total_debt = XBRLService.extract_latest_fact(facts_data, ['LongTermDebt', 'DebtCurrent', 'LongTermDebtAndCapitalLeaseObligations'])
+                log_update(ticker_upper, f"SEC XBRL Extraction Success.")
+            else:
+                log_update(ticker_upper, f"Warning: SEC XBRL returned status {facts_res.status_code}.")
+        except Exception as e:
+            log_update(ticker_upper, f"SEC XBRL Extraction skipped (Likely Foreign ADR).")
 
-        # 🛡️ THE FIX: Stealth Browser Headers to bypass Cloudflare
-        tv_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            "Accept": "application/json",
-            "Origin": "https://www.tradingview.com",
-            "Referer": "https://www.tradingview.com/"
-        }
+        # ==========================================
+        # PHASE 2: FINNHUB API (Replacing yfinance)
+        # ==========================================
+        log_update(ticker_upper, "Fetching live market data via Finnhub API...")
+        market_cap = None
+        pe_ratio = None
+        current_price = None
+
+        # Best practice: Pull this from os.environ or your .env file
+        FINNHUB_API_KEY = "your_free_finnhub_api_key" 
 
         try:
-            # ==========================================
-            # STEP 1: RESOLVE GLOBAL EXCHANGE
-            # ==========================================
-            search_url = f"https://symbol-search.tradingview.com/symbol_search/v3/?text={ticker_upper}&hl=1&type=stock"
-            search_res = requests.get(search_url, headers=tv_headers, timeout=10)
+            # 1. Fetch Current Price (Quote Endpoint)
+            quote_url = f"https://finnhub.io/api/v1/quote?symbol={ticker_upper}&token={FINNHUB_API_KEY}"
+            quote_res = requests.get(quote_url, timeout=10)
             
-            if search_res.status_code != 200:
-                raise ValueError(f"Failed to reach Global Search API. Status: {search_res.status_code}")
+            if quote_res.status_code == 200:
+                quote_data = quote_res.json()
+                # Finnhub returns 'c' for current price. It returns 0 if the symbol is invalid.
+                if quote_data.get('c') and float(quote_data.get('c')) > 0:
+                    current_price = float(quote_data['c'])
+            
+            # 2. Fetch Valuation Metrics (Basic Financials Endpoint)
+            metrics_url = f"https://finnhub.io/api/v1/stock/metric?symbol={ticker_upper}&metric=all&token={FINNHUB_API_KEY}"
+            metrics_res = requests.get(metrics_url, timeout=10)
+            
+            if metrics_res.status_code == 200:
+                # Finnhub nests the actual data inside a 'metric' dictionary
+                metrics_data = metrics_res.json().get('metric', {})
                 
-            results = search_res.json()
-            if not results:
-                raise ValueError(f"Ticker '{ticker_upper}' not found on any global exchange.")
-            
-            # Grab the top match to get the exact Exchange and Country
-            best_match = results[0]
-            exchange = best_match.get("exchange")
-            symbol = best_match.get("symbol")
-            country = best_match.get("country", "US").lower()
-            
-            tv_ticker = f"{exchange}:{symbol}"
-            log_update(ticker_upper, f"Resolved to Global Exchange: {tv_ticker} ({country.upper()})")
-
-            # Map the country to TradingView's regional scanner clusters
-            region_map = {
-                "us": "america",
-                "in": "india",
-                "uk": "uk",
-                "ca": "canada",
-                "au": "australia",
-                "cn": "china",
-                "jp": "japan",
-                "de": "germany",
-                "fr": "france"
-            }
-            region = region_map.get(country, "america") # Fallback to america
-
-            # ==========================================
-            # STEP 2: RIP EXACT FUNDAMENTALS
-            # ==========================================
-            scanner_url = f"https://scanner.tradingview.com/{region}/scan"
-            payload = {
-                "symbols": {"tickers": [tv_ticker]},
-                "columns": [
-                    "market_cap_basic", 
-                    "price_earnings_ttm", 
-                    "earnings_per_share_basic_ttm", 
-                    "total_revenue", 
-                    "total_debt"
-                ]
-            }
-            
-            # 🛡️ THE FIX: Pass headers here too!
-            scan_res = requests.post(scanner_url, headers=tv_headers, json=payload, timeout=10)
-            
-            if scan_res.status_code != 200:
-                raise ValueError(f"Scanner rejected the data request. Status: {scan_res.status_code}")
+                # Finnhub returns marketCapitalization in Millions (e.g., 2800000 for 2.8 Trillion)
+                raw_mcap = metrics_data.get('marketCapitalization')
+                if raw_mcap:
+                    market_cap = float(raw_mcap) * 1000000  # Convert millions to standard integer format
+                    
+                pe_ratio = metrics_data.get('peTTM')
                 
-            scan_data = scan_res.json().get("data", [])
-            if not scan_data:
-                raise ValueError(f"No fundamental data published for {tv_ticker}.")
+                # Bonus: Backfill EPS if the SEC XBRL Phase missed it
+                if eps is None:
+                    eps = metrics_data.get('epsTTM')
                 
-            # Extract the 5 data points
-            metrics = scan_data[0].get("d", [])
-            
-            market_cap = metrics[0]
-            pe_ratio = metrics[1]
-            eps = metrics[2]
-            revenue = metrics[3]
-            total_debt = metrics[4]
-
-            if not market_cap:
-                raise ValueError(f"Target '{ticker_upper}' lacks structural market valuation metrics.")
-
-            log_update(ticker_upper, "Successfully extracted audited global fundamentals.")
-
+            if current_price and market_cap:
+                log_update(ticker_upper, "Successfully extracted valuation using Finnhub API.")
+            else:
+                log_update(ticker_upper, f"Warning: Finnhub could not find full valuation for {ticker_upper}.")
+                 
         except Exception as e:
-            raise Exception(f"Valuation Engine Failed: {str(e)}")
+            raise Exception(f"Finnhub Valuation Engine Failed: {str(e)}")
 
+        # Hard validation checkpoint
+        if market_cap is None or (isinstance(market_cap, float) and math.isnan(market_cap)):
+            raise ValueError(f"Target '{ticker_upper}' lacks structural market valuation metrics.")
         # ==========================================
         # PHASE 3: SAFE TYPE CASTING & SUPABASE INJECT
         # ==========================================
@@ -132,9 +150,9 @@ class XBRLService:
         }
         
         try:
-            supabase_client.table("soc_company_fundamentals").upsert(
+            db_response = supabase_client.table("soc_company_fundamentals").upsert(
                 payload, on_conflict="ticker, fiscal_date"
             ).execute()
-            return payload
+            return db_response.data
         except Exception as e:
             raise Exception(f"Supabase Database Error: {str(e)}")
