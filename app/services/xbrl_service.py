@@ -104,28 +104,35 @@ class XBRLService:
             res = requests.get(fmp_url, timeout=5)
             if res.status_code == 200:
                 data_list = res.json()
+                if not data_list:
+                    # 🛡️ FAIL FAST: FMP confirms this ticker does not exist. Halt cascade.
+                    raise ValueError(f"Target '{ticker_upper}' explicitly rejected as invalid by FMP.")
                 if data_list:
                     current_price = data_list[0].get('price')
                     market_cap = data_list[0].get('mktCap')
                     pe_ratio = data_list[0].get('pe')
                     log_update(ticker_upper, "Successfully extracted valuation from FMP Profile.")
             else:
-                log_update(ticker_upper, f"FMP Profile failed: Status {res.status_code}")
+                log_update(ticker_upper, f"FMP Profile unavailable: Status {res.status_code}")
+        except ValueError as ve:
+            raise ve # Pass the fail-fast exception up!
         except Exception as e:
             log_update(ticker_upper, f"FMP Engine exception: {e}")
 
-        # --- LAYER B: FINNHUB AUTHENTICATED FALLBACK (Safe from Cloud Blocks) ---
+        # --- LAYER B: FINNHUB AUTHENTICATED FALLBACK ---
         if market_cap is None or current_price is None:
             log_update(ticker_upper, "FMP unavailable. Switching to Finnhub Authenticated Gateway...")
             try:
-                # 1. Fetch live price safely from Quote endpoint
                 if current_price is None:
                     quote_res = requests.get(f"https://finnhub.io/api/v1/quote?symbol={ticker_upper}&token={settings.finnhub_api_key}", timeout=5)
                     if quote_res.status_code == 200:
                         q_data = quote_res.json()
+                        # 🛡️ FAIL FAST: Finnhub returns c=0 for completely fake tickers
+                        if q_data.get('c') == 0 and q_data.get('d') is None:
+                            raise ValueError(f"Target '{ticker_upper}' explicitly rejected as invalid by Finnhub.")
                         if q_data.get('c') is not None:
                             current_price = float(q_data['c'])
-                # 2. Fetch market cap safely from Profile2 endpoint
+                
                 if market_cap is None:
                     profile_res = requests.get(f"https://finnhub.io/api/v1/stock/profile2?symbol={ticker_upper}&token={settings.finnhub_api_key}", timeout=5)
                     if profile_res.status_code == 200:
@@ -133,19 +140,19 @@ class XBRLService:
                         if p_data.get('marketCapitalization'):
                             market_cap = float(p_data['marketCapitalization']) * 1_000_000
                 
-                # 3. Fetch True TTM PE from Finnhub Basic Financials Metrics
                 if pe_ratio is None:
                     metric_res = requests.get(f"https://finnhub.io/api/v1/stock/metric?symbol={ticker_upper}&metric=all&token={settings.finnhub_api_key}", timeout=5)
                     if metric_res.status_code == 200:
                         m_data = metric_res.json()
                         pe_ratio = m_data.get('metric', {}).get('peTTM')
 
-                log_update(ticker_upper, f"Finnhub Pass Complete. PE acquired from API: {pe_ratio is not None}")
+                log_update(ticker_upper, f"Finnhub Pass Complete. PE acquired: {pe_ratio is not None}")
+            except ValueError as ve:
+                raise ve # Pass the fail-fast exception up!
             except Exception as e:
                 log_update(ticker_upper, f"Finnhub fallback exception: {e}")
 
         # --- LAYER C: POLYGON.IO EMERGENCY AUTHENTICATED FALLBACK ---
-        # Polygon offers 5 free API calls/min, immune to cloud IP blocks because it uses an explicit key.
         if market_cap is None or current_price is None or pe_ratio is None:
             if settings.polygon_api_key:
                 log_update(ticker_upper, "Cascading to Polygon.io Emergency Gateway...")
@@ -154,11 +161,14 @@ class XBRLService:
                         poly_url = f"https://api.polygon.io/v2/aggs/ticker/{ticker_upper}/prev?adjusted=true&apiKey={settings.polygon_api_key}"
                         poly_res = requests.get(poly_url, timeout=5)
                         if poly_res.status_code == 200:
-                            results = poly_res.json().get('results', [])
+                            p_json = poly_res.json()
+                            # 🛡️ FAIL FAST: Polygon confirms ticker doesn't exist
+                            if p_json.get('resultsCount', 0) == 0:
+                                raise ValueError(f"Target '{ticker_upper}' explicitly rejected as invalid by Polygon.")
+                            results = p_json.get('results', [])
                             if results:
                                 current_price = float(results[0].get('c'))
-                            
-                    # Pull ticker details for market cap and alternative metadata checks
+                    
                     ticker_url = f"https://api.polygon.io/v3/reference/tickers/{ticker_upper}?apiKey={settings.polygon_api_key}"
                     t_res = requests.get(ticker_url, timeout=5)
                     if t_res.status_code == 200:
@@ -168,22 +178,21 @@ class XBRLService:
                             if val:
                                 market_cap = val
                                 log_update(ticker_upper, "Successfully extracted market cap from Polygon.")
-                    # If PE is still missing, pull from the live Polygon Ticker Snapshot endpoint
+                    
                     if pe_ratio is None:
-                        snap_url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{ticker_upper}?apiKey={settings.polygon_api_key}"
-                        s_res = requests.get(snap_url, timeout=5)
-                        if s_res.status_code == 200:
-                            pe_ratio = s_res.json().get('ticker', {}).get('mineries', {}).get('pe')
+                        # Snapshot endpoint requires a higher Polygon subscription.
+                        # Skip PE extraction from Polygon on the current plan.
+                        pass
+                except ValueError as ve:
+                    raise ve # Pass the fail-fast exception up!
                 except Exception as e:
                     log_update(ticker_upper, f"Polygon emergency fallback failed: {e}")
 
         # --- LAYER D: YFINANCE UNIVERSAL FETCH ---
-        # This acts as a comprehensive catch-all before hitting manual fallbacks.
         if market_cap is None or current_price is None or pe_ratio is None:
             log_update(ticker_upper, "Attempting YFinance universal fetch...")
             try:
                 stock = yf.Ticker(ticker_upper)
-                # Attempt to get full info dictionary
                 info = stock.info
                 
                 if current_price is None:
@@ -193,7 +202,6 @@ class XBRLService:
                 if pe_ratio is None:
                     pe_ratio = info.get('trailingPE')
 
-                # Check if at least the essential metrics are present
                 if current_price and market_cap:
                     log_update(ticker_upper, "YFinance fetch successful: Price and Market Cap retrieved.")
                 elif current_price:
@@ -201,15 +209,14 @@ class XBRLService:
                 else:
                     log_update(ticker_upper, "YFinance fetch failed: No essential data found.")
             except Exception as e:
-                # Handle the specific "Expecting value" error or generic failures
                 err_msg = str(e)
-                if "Expecting value" in err_msg or "line 1 column 1" in err_msg:
-                    log_update(ticker_upper, "YFinance validation failed (likely empty response). Proceeding to Layer E...")
+                if "Expecting value" in err_msg or "line 1 column 1" in err_msg or "404" in err_msg:
+                    # 🛡️ FAIL FAST: YFinance doesn't know it either
+                    raise ValueError(f"Target '{ticker_upper}' rejected by YFinance. Definitively invalid.")
                 else:
                     log_update(ticker_upper, f"YFinance minor error: {err_msg}. Proceeding to Layer E...")
 
         # --- LAYER E: MATH DERIVATION FALLBACK ---
-        # Only drops down here if ALL API providers completely dropped the ball on TTM PE.
         if pe_ratio is None and current_price and eps:
             eps_float = float(eps)
             if eps_float > 0:
@@ -223,6 +230,7 @@ class XBRLService:
         # Final Hard Validation
         if market_cap is None or (isinstance(market_cap, float) and math.isnan(market_cap)):
             raise ValueError(f"Target '{ticker_upper}' lacks structural market valuation metrics after all authenticated fallbacks.")
+        
         # ==========================================
         # PHASE 3: SAFE TYPE CASTING & SUPABASE INJECT
         # ==========================================
