@@ -24,16 +24,27 @@ class XBRLService:
 
     @staticmethod
     def extract_latest_fact(company_facts: dict, possible_tags: list) -> float:
-        us_gaap = company_facts.get('facts', {}).get('us-gaap', {})
-        for tag in possible_tags:
-            if tag in us_gaap:
-                units = us_gaap[tag].get('units', {})
-                if 'USD' in units:
-                    observations = units['USD']
-                    valid_obs = [obs for obs in observations if 'val' in obs and 'filed' in obs]
-                    if valid_obs:
-                        latest_obs = sorted(valid_obs, key=lambda x: x['filed'], reverse=True)[0]
-                        return float(latest_obs['val'])
+        # DYNAMIC UPGRADE: Handle US Domestic (us-gaap) and International ADRs (ifrs-full)
+        accounting_standards = ['us-gaap', 'ifrs-full']
+        
+        for standard in accounting_standards:
+            taxonomy = company_facts.get('facts', {}).get(standard, {})
+            if not taxonomy:
+                continue
+                
+            for tag in possible_tags:
+                if tag in taxonomy:
+                    units = taxonomy[tag].get('units', {})
+                    # Grab USD if available, otherwise take the first reported currency unit
+                    val_key = 'USD' if 'USD' in units else list(units.keys())[0] if units else None
+                    
+                    if val_key:
+                        observations = units[val_key]
+                        valid_obs = [obs for obs in observations if 'val' in obs and 'filed' in obs]
+                        if valid_obs:
+                            # Sort by filed date to ensure we grab the absolute latest audited number
+                            latest_obs = sorted(valid_obs, key=lambda x: x['filed'], reverse=True)[0]
+                            return float(latest_obs['val'])
         return None
 
     @staticmethod
@@ -80,57 +91,70 @@ class XBRLService:
             log_update(ticker_upper, f"SEC XBRL Extraction skipped (Likely Foreign ADR).")
 
         # ==========================================
-        # PHASE 2: FINNHUB API (Replacing yfinance)
+        # PHASE 2 & 3: THE VALUATION WATERFALL
         # ==========================================
-        log_update(ticker_upper, "Fetching live market data via Finnhub API...")
+        log_update(ticker_upper, "Initiating dynamic valuation waterfall...")
         market_cap = None
         pe_ratio = None
         current_price = None
 
-        # Best practice: Pull this from os.environ or your .env file
-        FINNHUB_API_KEY = "your_free_finnhub_api_key" 
+        # Best practice: Pull this from os.environ
+        FINNHUB_API_KEY = "your_free_finnhub_api_key"
 
+        # --- BLOCK A: FINNHUB PRIMARY API ---
         try:
-            # 1. Fetch Current Price (Quote Endpoint)
-            quote_url = f"https://finnhub.io/api/v1/quote?symbol={ticker_upper}&token={FINNHUB_API_KEY}"
-            quote_res = requests.get(quote_url, timeout=10)
-            
+            # 1. Quote Endpoint (Live Price)
+            quote_res = requests.get(f"https://finnhub.io/api/v1/quote?symbol={ticker_upper}&token={FINNHUB_API_KEY}", timeout=5)
             if quote_res.status_code == 200:
-                quote_data = quote_res.json()
-                # Finnhub returns 'c' for current price. It returns 0 if the symbol is invalid.
-                if quote_data.get('c') and float(quote_data.get('c')) > 0:
-                    current_price = float(quote_data['c'])
-            
-            # 2. Fetch Valuation Metrics (Basic Financials Endpoint)
-            metrics_url = f"https://finnhub.io/api/v1/stock/metric?symbol={ticker_upper}&metric=all&token={FINNHUB_API_KEY}"
-            metrics_res = requests.get(metrics_url, timeout=10)
-            
-            if metrics_res.status_code == 200:
-                # Finnhub nests the actual data inside a 'metric' dictionary
-                metrics_data = metrics_res.json().get('metric', {})
-                
-                # Finnhub returns marketCapitalization in Millions (e.g., 2800000 for 2.8 Trillion)
-                raw_mcap = metrics_data.get('marketCapitalization')
-                if raw_mcap:
-                    market_cap = float(raw_mcap) * 1000000  # Convert millions to standard integer format
-                    
-                pe_ratio = metrics_data.get('peTTM')
-                
-                # Bonus: Backfill EPS if the SEC XBRL Phase missed it
-                if eps is None:
-                    eps = metrics_data.get('epsTTM')
-                
-            if current_price and market_cap:
-                log_update(ticker_upper, "Successfully extracted valuation using Finnhub API.")
-            else:
-                log_update(ticker_upper, f"Warning: Finnhub could not find full valuation for {ticker_upper}.")
-                 
-        except Exception as e:
-            raise Exception(f"Finnhub Valuation Engine Failed: {str(e)}")
+                q_data = quote_res.json()
+                if q_data.get('c') and float(q_data['c']) > 0:
+                    current_price = float(q_data['c'])
 
-        # Hard validation checkpoint
+            # 2. Profile2 Endpoint (Rock-Solid Market Cap & Shares Outstanding)
+            shares_outstanding = None
+            profile_res = requests.get(f"https://finnhub.io/api/v1/stock/profile2?symbol={ticker_upper}&token={FINNHUB_API_KEY}", timeout=5)
+            if profile_res.status_code == 200:
+                p_data = profile_res.json()
+                if p_data.get('marketCapitalization'):
+                    market_cap = float(p_data['marketCapitalization']) * 1000000
+                if p_data.get('shareOutstanding'):
+                    shares_outstanding = float(p_data['shareOutstanding']) * 1000000
+
+            # 3. Metric Endpoint (For PE and EPS)
+            metric_res = requests.get(f"https://finnhub.io/api/v1/stock/metric?symbol={ticker_upper}&metric=all&token={FINNHUB_API_KEY}", timeout=5)
+            if metric_res.status_code == 200:
+                m_data = metric_res.json().get('metric', {})
+                pe_ratio = m_data.get('peTTM')
+                if eps is None:
+                    eps = m_data.get('epsTTM')
+                    
+        except Exception as e:
+            log_update(ticker_upper, f"Finnhub primary fetch encountered an issue: {e}")
+
+        # --- BLOCK B: YFINANCE SILENT FALLBACK ---
+        if market_cap is None or current_price is None:
+            log_update(ticker_upper, "Finnhub missed structural data. Cascading to yfinance fallback...")
+            try:
+                stock = yf.Ticker(ticker_upper)
+                fast = stock.fast_info
+                if current_price is None:
+                    current_price = getattr(fast, 'last_price', getattr(fast, 'previous_close', None))
+                if market_cap is None:
+                    market_cap = getattr(fast, 'market_cap', None)
+            except Exception:
+                pass
+
+        # --- BLOCK C: MATHEMATICAL RECONSTRUCTION ---
+        if market_cap is None and current_price is not None and shares_outstanding is not None:
+            log_update(ticker_upper, "Cascading to Math Reconstruction: Price * Shares...")
+            market_cap = current_price * shares_outstanding
+
+        if pe_ratio is None and current_price and eps and float(eps) > 0:
+            pe_ratio = current_price / float(eps)
+
+        # Final Hard Validation
         if market_cap is None or (isinstance(market_cap, float) and math.isnan(market_cap)):
-            raise ValueError(f"Target '{ticker_upper}' lacks structural market valuation metrics.")
+            raise ValueError(f"Target '{ticker_upper}' lacks structural market valuation metrics after all fallbacks.")
         # ==========================================
         # PHASE 3: SAFE TYPE CASTING & SUPABASE INJECT
         # ==========================================
