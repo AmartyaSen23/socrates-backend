@@ -26,15 +26,23 @@ class XBRLService:
 
         log_update(ticker_upper, "Engaging Global Institutional Scanner (TradingView Protocol)...")
 
+        # 🛡️ THE FIX: Stealth Browser Headers to bypass Cloudflare
+        tv_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Origin": "https://www.tradingview.com",
+            "Referer": "https://www.tradingview.com/"
+        }
+
         try:
             # ==========================================
             # STEP 1: RESOLVE GLOBAL EXCHANGE
             # ==========================================
             search_url = f"https://symbol-search.tradingview.com/symbol_search/v3/?text={ticker_upper}&hl=1&type=stock"
-            search_res = requests.get(search_url, timeout=10)
+            search_res = requests.get(search_url, headers=tv_headers, timeout=10)
             
             if search_res.status_code != 200:
-                raise ValueError("Failed to reach Global Search API.")
+                raise ValueError(f"Failed to reach Global Search API. Status: {search_res.status_code}")
                 
             results = search_res.json()
             if not results:
@@ -78,10 +86,11 @@ class XBRLService:
                 ]
             }
             
-            scan_res = requests.post(scanner_url, json=payload, timeout=10)
+            # 🛡️ THE FIX: Pass headers here too!
+            scan_res = requests.post(scanner_url, headers=tv_headers, json=payload, timeout=10)
             
             if scan_res.status_code != 200:
-                raise ValueError("Scanner rejected the data request.")
+                raise ValueError(f"Scanner rejected the data request. Status: {scan_res.status_code}")
                 
             scan_data = scan_res.json().get("data", [])
             if not scan_data:
