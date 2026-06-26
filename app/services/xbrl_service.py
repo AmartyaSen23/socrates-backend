@@ -2,7 +2,7 @@ import requests
 import math
 import yfinance as yf
 from app.database import supabase_client
-from datetime import datetime
+from datetime import datetime, timedelta
 from app.status_store import log_update
 
 class XBRLService:
@@ -90,22 +90,53 @@ class XBRLService:
         try:
             stock = yf.Ticker(ticker_upper)
             
-            # 1. Your brilliant fast_info bypass
-            fast = stock.fast_info
-            market_cap = fast.get('market_cap')
-            current_price = fast.get('last_price')
-            
-            # 2. Try grabbing standard .info for the missing gaps (Foreign ADRs)
+            # --- LAYER 1: Object/Dict agnostic fast_info extraction ---
+            try:
+                fast = stock.fast_info
+                # Attempt attribute access (newer yfinance)
+                market_cap = getattr(fast, 'market_cap', None)
+                current_price = getattr(fast, 'last_price', None)
+                
+                # Attempt dict access (older yfinance) if attributes were missing
+                if market_cap is None and hasattr(fast, 'get'):
+                    market_cap = fast.get('market_cap', fast.get('marketCap'))
+                if current_price is None and hasattr(fast, 'get'):
+                    current_price = fast.get('last_price', fast.get('regularMarketPrice'))
+            except Exception:
+                pass
+
+            # --- LAYER 2: Try grabbing standard .info for missing gaps ---
             try:
                 info = stock.info
+                if market_cap is None: market_cap = info.get("marketCap")
+                if current_price is None: current_price = info.get("currentPrice", info.get("regularMarketPrice"))
                 if revenue is None: revenue = info.get("totalRevenue")
                 if eps is None: eps = info.get("trailingEps")
                 if total_debt is None: total_debt = info.get("totalDebt")
-                pe_ratio = info.get("trailingPE")
+                if pe_ratio is None: pe_ratio = info.get("trailingPE")
             except Exception:
                 log_update(ticker_upper, "Note: Standard .info dictionary was blocked by Yahoo.")
 
-            # 3. Calculate P/E mathematically if Yahoo hid it!
+            # --- LAYER 3: The Ultimate Bulletproof Fallback (Mathematical Reconstruction) ---
+            if current_price is None or (isinstance(current_price, float) and math.isnan(current_price)):
+                try:
+                    hist = stock.history(period="5d")
+                    if not hist.empty:
+                        current_price = float(hist['Close'].iloc[-1])
+                except Exception:
+                    pass
+
+            if market_cap is None or (isinstance(market_cap, float) and math.isnan(market_cap)):
+                try:
+                    start_date = (datetime.today() - timedelta(days=30)).strftime('%Y-%m-%d')
+                    shares = stock.get_shares_full(start=start_date, end=today)
+                    if shares is not None and not shares.empty and current_price:
+                        market_cap = current_price * float(shares.iloc[-1])
+                        log_update(ticker_upper, "Market Cap mathematically reconstructed via shares outstanding!")
+                except Exception:
+                    pass
+
+            # Calculate P/E mathematically if Yahoo hid it!
             if pe_ratio is None and current_price and eps and eps > 0:
                 pe_ratio = current_price / eps
                 
@@ -114,21 +145,23 @@ class XBRLService:
         except Exception as e:
             raise Exception(f"Standard Valuation Engine Failed: {str(e)}")
 
-        if not market_cap or math.isnan(market_cap):
+        # Hard validation checkpoint
+        if market_cap is None or (isinstance(market_cap, float) and math.isnan(market_cap)):
             raise ValueError(f"Target '{ticker_upper}' lacks structural market valuation metrics.")
 
         # ==========================================
         # PHASE 3: SAFE TYPE CASTING & SUPABASE INJECT
         # ==========================================
         def safe_cast(val):
-            if val is None or math.isnan(val): return None
+            if val is None or (isinstance(val, float) and math.isnan(val)): 
+                return None
             return int(val)
 
         payload = {
             "ticker": ticker_upper,
             "revenue": safe_cast(revenue), 
-            "eps": float(eps) if eps is not None and not math.isnan(eps) else None,
-            "pe_ratio": float(pe_ratio) if pe_ratio is not None and not math.isnan(pe_ratio) else None,
+            "eps": float(eps) if eps is not None and not math.isnan(float(eps)) else None,
+            "pe_ratio": float(pe_ratio) if pe_ratio is not None and not math.isnan(float(pe_ratio)) else None,
             "market_cap": safe_cast(market_cap),
             "total_debt": safe_cast(total_debt),
             "fiscal_date": today
