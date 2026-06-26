@@ -98,58 +98,50 @@ class XBRLService:
         pe_ratio = None
         current_price = None
 
-        # Fetch keys cleanly from your existing settings configuration
-        FMP_API_KEY = getattr(settings, "FMP_API_KEY", None)
-        FINNHUB_API_KEY = getattr(settings, "FINNHUB_API_KEY", None)
-        POLYGON_API_KEY = getattr(settings, "POLYGON_API_KEY", None)
-
         # --- LAYER A: FMP PROFILE ENDPOINT ---
-        if FMP_API_KEY and FMP_API_KEY != "your_free_fmp_api_key":
-            try:
-                fmp_url = f"https://financialmodelingprep.com/api/v3/profile/{ticker_upper}?apikey={FMP_API_KEY}"
-                res = requests.get(fmp_url, timeout=5)
-                if res.status_code == 200:
-                    data_list = res.json()
-                    if data_list:
-                        current_price = data_list[0].get('price')
-                        market_cap = data_list[0].get('mktCap')
-                        log_update(ticker_upper, "Successfully extracted valuation from FMP Profile.")
-                else:
-                    log_update(ticker_upper, f"FMP Profile failed: Status {res.status_code}")
-            except Exception as e:
-                log_update(ticker_upper, f"FMP Engine exception: {e}")
+        try:
+            fmp_url = f"https://financialmodelingprep.com/api/v3/profile/{ticker_upper}?apikey={settings.fmp_api_key}"
+            res = requests.get(fmp_url, timeout=5)
+            if res.status_code == 200:
+                data_list = res.json()
+                if data_list:
+                    current_price = data_list[0].get('price')
+                    market_cap = data_list[0].get('mktCap')
+                    log_update(ticker_upper, "Successfully extracted valuation from FMP Profile.")
+            else:
+                log_update(ticker_upper, f"FMP Profile failed: Status {res.status_code}")
+        except Exception as e:
+            log_update(ticker_upper, f"FMP Engine exception: {e}")
 
         # --- LAYER B: FINNHUB AUTHENTICATED FALLBACK (Safe from Cloud Blocks) ---
         if market_cap is None or current_price is None:
-            if FINNHUB_API_KEY and FINNHUB_API_KEY != "your_free_finnhub_api_key":
-                log_update(ticker_upper, "FMP unavailable. Switching to Finnhub Authenticated Gateway...")
-                try:
-                    # 1. Fetch live price safely from Quote endpoint
-                    quote_res = requests.get(f"https://finnhub.io/api/v1/quote?symbol={ticker_upper}&token={FINNHUB_API_KEY}", timeout=5)
-                    if quote_res.status_code == 200:
-                        q_data = quote_res.json()
-                        if q_data.get('c'):
-                            current_price = float(q_data['c'])
-
-                    # 2. Fetch market cap safely from Profile2 endpoint
-                    profile_res = requests.get(f"https://finnhub.io/api/v1/stock/profile2?symbol={ticker_upper}&token={FINNHUB_API_KEY}", timeout=5)
-                    if profile_res.status_code == 200:
-                        p_data = profile_res.json()
-                        if p_data.get('marketCapitalization'):
-                            market_cap = float(p_data['marketCapitalization']) * 1,000,000
-                    
-                    if current_price and market_cap:
-                        log_update(ticker_upper, "Successfully extracted valuation from Finnhub.")
-                except Exception as e:
-                    log_update(ticker_upper, f"Finnhub fallback exception: {e}")
+            log_update(ticker_upper, "FMP unavailable. Switching to Finnhub Authenticated Gateway...")
+            try:
+                # 1. Fetch live price safely from Quote endpoint
+                quote_res = requests.get(f"https://finnhub.io/api/v1/quote?symbol={ticker_upper}&token={settings.finnhub_api_key}", timeout=5)
+                if quote_res.status_code == 200:
+                    q_data = quote_res.json()
+                    if q_data.get('c'):
+                        current_price = float(q_data['c'])
+                # 2. Fetch market cap safely from Profile2 endpoint
+                profile_res = requests.get(f"https://finnhub.io/api/v1/stock/profile2?symbol={ticker_upper}&token={settings.finnhub_api_key}", timeout=5)
+                if profile_res.status_code == 200:
+                    p_data = profile_res.json()
+                    if p_data.get('marketCapitalization'):
+                        market_cap = float(p_data['marketCapitalization']) * 1,000,000
+                
+                if current_price and market_cap:
+                    log_update(ticker_upper, "Successfully extracted valuation from Finnhub.")
+            except Exception as e:
+                log_update(ticker_upper, f"Finnhub fallback exception: {e}")
 
         # --- LAYER C: POLYGON.IO EMERGENCY AUTHENTICATED FALLBACK ---
         # Polygon offers 5 free API calls/min, immune to cloud IP blocks because it uses an explicit key.
         if market_cap is None or current_price is None:
-            if POLYGON_API_KEY:
+            if settings.polygon_api_key:
                 log_update(ticker_upper, "Cascading to Polygon.io Emergency Gateway...")
                 try:
-                    poly_url = f"https://api.polygon.io/v2/aggs/ticker/{ticker_upper}/prev?adjusted=true&apiKey={POLYGON_API_KEY}"
+                    poly_url = f"https://api.polygon.io/v2/aggs/ticker/{ticker_upper}/prev?adjusted=true&apiKey={settings.polygon_api_key}"
                     poly_res = requests.get(poly_url, timeout=5)
                     if poly_res.status_code == 200:
                         results = poly_res.json().get('results', [])
@@ -157,7 +149,7 @@ class XBRLService:
                             current_price = float(results[0].get('c')) # Close price of previous day
                             
                             # If we have price but no market cap, pull tickers details
-                            ticker_url = f"https://api.polygon.io/v3/reference/tickers/{ticker_upper}?apiKey={POLYGON_API_KEY}"
+                            ticker_url = f"https://api.polygon.io/v3/reference/tickers/{ticker_upper}?apiKey={settings.polygon_api_key}"
                             t_res = requests.get(ticker_url, timeout=5)
                             if t_res.status_code == 200:
                                 market_cap = t_res.json().get('results', {}).get('market_cap')
