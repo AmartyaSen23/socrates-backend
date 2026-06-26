@@ -1,10 +1,12 @@
 import requests
-import re
+import math
+import yfinance as yf
 from app.database import supabase_client
 from datetime import datetime
 from app.status_store import log_update
 
 class XBRLService:
+    # Official SEC User-Agent requirement
     SEC_HEADERS = {'User-Agent': 'SocratesResearchEngine admin@socrates.com'}
 
     @staticmethod
@@ -35,24 +37,6 @@ class XBRLService:
         return None
 
     @staticmethod
-    def _rip_html_metric(html_text: str, json_keys: list, streamer_key: str, is_float: bool = False):
-        """Rips exact metrics out of Yahoo's raw HTML DOM and Next.js hydration states."""
-        # 1. Search the hidden JSON state
-        for key in json_keys:
-            match = re.search(rf'"{key}":\{{"raw":([\d\.\-]+)', html_text)
-            if match:
-                val = float(match.group(1))
-                return val if is_float else int(val)
-                
-        # 2. Search the live fin-streamer tags as a backup
-        if streamer_key:
-            match = re.search(rf'data-field="{streamer_key}"[^>]*value="([\d\.\-]+)"', html_text)
-            if match:
-                val = float(match.group(1))
-                return val if is_float else int(val)
-        return None
-
-    @staticmethod
     def fetch_and_store_fundamentals(ticker: str):
         ticker_upper = ticker.upper()
         today = datetime.today().strftime('%Y-%m-%d')
@@ -72,7 +56,7 @@ class XBRLService:
             print(f"Cache check failed: {e}")
 
         # ==========================================
-        # PHASE 1: SEC EDGAR XBRL (Accounting Data)
+        # PHASE 1: SEC EDGAR XBRL (The Official Way)
         # ==========================================
         log_update(ticker_upper, "Fetching audited accounting metrics from SEC EDGAR XBRL...")
         revenue = None
@@ -82,7 +66,7 @@ class XBRLService:
         try:
             cik = XBRLService.get_cik_from_ticker(ticker_upper)
             facts_url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
-            facts_res = requests.get(facts_url, headers=XBRLService.SEC_HEADERS, timeout=15)
+            facts_res = requests.get(facts_url, headers=XBRLService.SEC_HEADERS, timeout=10)
             
             if facts_res.status_code == 200:
                 facts_data = facts_res.json()
@@ -93,72 +77,60 @@ class XBRLService:
             else:
                 log_update(ticker_upper, f"Warning: SEC XBRL returned status {facts_res.status_code}.")
         except Exception as e:
-            log_update(ticker_upper, f"SEC XBRL Extraction skipped (Likely Foreign Issuer like ADR).")
+            log_update(ticker_upper, f"SEC XBRL Extraction skipped (Likely Foreign ADR).")
 
         # ==========================================
-        # PHASE 2: STEALTH HTML RIPPER (No APIs, No Crumbs)
+        # PHASE 2: STANDARD YFINANCE FAST_INFO
         # ==========================================
-        log_update(ticker_upper, "Bypassing Yahoo APIs. Engaging direct HTML Data Ripper...")
-        
-        session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9'
-        })
-        
+        log_update(ticker_upper, "Fetching live market data via yfinance fast_info...")
+        market_cap = None
+        pe_ratio = None
+        current_price = None
+
         try:
-            # We hit the main webpage. They can't block this without killing their SEO.
-            html_res = session.get(f'https://finance.yahoo.com/quote/{ticker_upper}', timeout=15)
+            stock = yf.Ticker(ticker_upper)
             
-            if html_res.status_code != 200:
-                raise ValueError(f"Yahoo HTML page blocked. Status Code: {html_res.status_code}")
+            # 1. Your brilliant fast_info bypass
+            fast = stock.fast_info
+            market_cap = fast.get('market_cap')
+            current_price = fast.get('last_price')
+            
+            # 2. Try grabbing standard .info for the missing gaps (Foreign ADRs)
+            try:
+                info = stock.info
+                if revenue is None: revenue = info.get("totalRevenue")
+                if eps is None: eps = info.get("trailingEps")
+                if total_debt is None: total_debt = info.get("totalDebt")
+                pe_ratio = info.get("trailingPE")
+            except Exception:
+                log_update(ticker_upper, "Note: Standard .info dictionary was blocked by Yahoo.")
+
+            # 3. Calculate P/E mathematically if Yahoo hid it!
+            if pe_ratio is None and current_price and eps and eps > 0:
+                pe_ratio = current_price / eps
                 
-            html_text = html_res.text
-            
-            # 1. Validate Equity Type from HTML
-            q_type_match = re.search(r'"quoteType":"([^"]+)"', html_text)
-            if q_type_match:
-                q_type = q_type_match.group(1)
-                if q_type not in ["EQUITY", "ADR"]:
-                    raise ValueError(f"'{ticker_upper}' is a {q_type}. Socrates AI requires equities or ADRs.")
+            log_update(ticker_upper, "Successfully extracted valuation using standard APIs.")
 
-            # 2. Rip Valuation Data
-            market_cap = XBRLService._rip_html_metric(html_text, ["marketCap"], "marketCap", False)
-            pe_ratio = XBRLService._rip_html_metric(html_text, ["trailingPE"], "trailingPE", True)
-            
-            # 3. Rip Fundamentals (Only override if SEC XBRL failed for foreign tickers)
-            if eps is None:
-                eps = XBRLService._rip_html_metric(html_text, ["trailingEps", "epsTrailingTwelveMonths"], "epsTrailingTwelveMonths", True)
-            if revenue is None:
-                revenue = XBRLService._rip_html_metric(html_text, ["totalRevenue"], "totalRevenue", False)
-            if total_debt is None:
-                total_debt = XBRLService._rip_html_metric(html_text, ["totalDebt"], "totalDebt", False)
-
-            if market_cap is None:
-                raise ValueError(f"Target '{ticker_upper}' lacks structural market valuation metrics in HTML payload.")
-                
-            log_update(ticker_upper, "HTML Rip Successful. Matrix data extracted flawlessly.")
-
-        except ValueError as ve:
-            raise ve
         except Exception as e:
-            raise Exception(f"HTML Ripper Engine Failed: {str(e)}")
+            raise Exception(f"Standard Valuation Engine Failed: {str(e)}")
+
+        if not market_cap or math.isnan(market_cap):
+            raise ValueError(f"Target '{ticker_upper}' lacks structural market valuation metrics.")
 
         # ==========================================
         # PHASE 3: SAFE TYPE CASTING & SUPABASE INJECT
         # ==========================================
-        safe_revenue = int(revenue) if revenue is not None else None
-        safe_market_cap = int(market_cap) if market_cap is not None else None
-        safe_total_debt = int(total_debt) if total_debt is not None else None
+        def safe_cast(val):
+            if val is None or math.isnan(val): return None
+            return int(val)
 
         payload = {
             "ticker": ticker_upper,
-            "revenue": safe_revenue, 
-            "eps": eps,
-            "pe_ratio": pe_ratio,
-            "market_cap": safe_market_cap,
-            "total_debt": safe_total_debt,
+            "revenue": safe_cast(revenue), 
+            "eps": float(eps) if eps is not None and not math.isnan(eps) else None,
+            "pe_ratio": float(pe_ratio) if pe_ratio is not None and not math.isnan(pe_ratio) else None,
+            "market_cap": safe_cast(market_cap),
+            "total_debt": safe_cast(total_debt),
             "fiscal_date": today
         }
         
