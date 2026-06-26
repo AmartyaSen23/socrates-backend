@@ -91,56 +91,64 @@ class XBRLService:
             log_update(ticker_upper, f"SEC XBRL Extraction skipped (Likely Foreign ADR).")
 
         # ==========================================
-        # PHASE 2: REAL-TIME VALUATION (FMP ENGINE)
+        # PHASE 2: REAL-TIME VALUATION (ANTI-BLOCK UPGRADE)
         # ==========================================
-        log_update(ticker_upper, "Fetching live market data via Financial Modeling Prep (FMP)...")
+        log_update(ticker_upper, "Fetching live market data...")
         market_cap = None
         pe_ratio = None
         current_price = None
- 
 
-        # --- LAYER A: FMP REST API ---
-        try:
-            fmp_url = f"https://financialmodelingprep.com/api/v3/quote/{ticker_upper}?apikey={settings.fmp_api_key}"
-            res = requests.get(fmp_url, timeout=10)
-            
-            if res.status_code == 200:
-                data_list = res.json()
-                if data_list and len(data_list) > 0:
-                    fmp_data = data_list[0]
-                    current_price = fmp_data.get('price')
-                    market_cap = fmp_data.get('marketCap')
-                    pe_ratio = fmp_data.get('pe')
-                    
-                    # Clean backfill for EPS if SEC data had holes
-                    if eps is None: 
-                        eps = fmp_data.get('eps')
+        FMP_API_KEY = "your_free_fmp_api_key" 
+
+        # --- LAYER A: FMP PROFILE ENDPOINT (Bypassing the Legacy Quote Paywall) ---
+        if FMP_API_KEY and FMP_API_KEY != "your_free_fmp_api_key":
+            try:
+                # The /profile/ endpoint is still accessible on the free tier
+                fmp_url = f"https://financialmodelingprep.com/api/v3/profile/{ticker_upper}?apikey={FMP_API_KEY}"
+                res = requests.get(fmp_url, timeout=10)
+                
+                if res.status_code == 200:
+                    data_list = res.json()
+                    if data_list and len(data_list) > 0:
+                        fmp_data = data_list[0]
+                        current_price = fmp_data.get('price')
+                        market_cap = fmp_data.get('mktCap')
                         
-                    log_update(ticker_upper, "Successfully extracted live valuation from FMP.")
+                        log_update(ticker_upper, "Successfully extracted live valuation from FMP Profile.")
+                    else:
+                        log_update(ticker_upper, f"Warning: FMP returned empty profile for {ticker_upper}.")
                 else:
-                    log_update(ticker_upper, f"Warning: FMP returned empty array for {ticker_upper}.")
-            else:
-                log_update(ticker_upper, f"FMP API Error: Status {res.status_code} - {res.text}")
-        except Exception as e:
-            log_update(ticker_upper, f"FMP Engine exception: {e}")
+                    log_update(ticker_upper, f"FMP API Error: Status {res.status_code} - {res.text}")
+            except Exception as e:
+                log_update(ticker_upper, f"FMP Engine exception: {e}")
 
-        # --- LAYER B: BRITTLE-BUT-SAFE SCRAPING FALLBACK ---
-        # If FMP is out of credits or blocks, we fallback to scraping live metrics directly
+        # --- LAYER B: YFINANCE ARMORED FALLBACK (Bypassing fast_info bans) ---
         if market_cap is None or current_price is None:
-            log_update(ticker_upper, "FMP metrics unavailable. Attempting isolated yfinance fallback...")
+            log_update(ticker_upper, "FMP failed. Triggering armored yfinance fallback...")
             try:
                 stock = yf.Ticker(ticker_upper)
-                fast = stock.fast_info
-                if current_price is None: current_price = getattr(fast, 'last_price', None)
-                if market_cap is None: market_cap = getattr(fast, 'market_cap', None)
-            except Exception:
-                pass
+                
+                # 1. Evade IP blocks by using standard history routing
+                if current_price is None:
+                    hist = stock.history(period="1d")
+                    if not hist.empty:
+                        current_price = float(hist['Close'].iloc[-1])
+                
+                # 2. Pull structural market cap from the core info dictionary
+                if market_cap is None:
+                    info = stock.info
+                    market_cap = info.get('marketCap')
+                    
+                if current_price and market_cap:
+                    log_update(ticker_upper, "yfinance fallback successful.")
+            except Exception as e:
+                log_update(ticker_upper, f"yfinance fallback completely rejected: {e}")
 
-        # --- LAYER C: MATH DERIVATION ---
+        # --- LAYER C: MATH DERIVATION & RECONSTRUCTION ---
         if pe_ratio is None and current_price and eps and float(eps) > 0:
             pe_ratio = current_price / float(eps)
 
-        # Hard validation checkpoint
+        # Final Hard Validation
         if market_cap is None or (isinstance(market_cap, float) and math.isnan(market_cap)):
             raise ValueError(f"Target '{ticker_upper}' lacks structural market valuation metrics after all fallbacks.")
         # ==========================================
