@@ -1,87 +1,89 @@
-🏛️ Socrates Research Engine - Core Backend
+# 🏛️ Socrates AI: Autonomous Quantitative Research Engine (Core Backend)
+![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.111.0-009688.svg)
+![Supabase](https://img.shields.io/badge/Supabase-pgvector-3ECF8E.svg)
+![Groq](https://img.shields.io/badge/Groq-Llama_3.3_70B-F55036.svg)
+![Cohere](https://img.shields.io/badge/Cohere-Embed_v3.0-39594D.svg)
+![SEC_EDGAR](https://img.shields.io/badge/SEC_EDGAR-Automated_Ingestion-005587.svg)
+## 🧠 Overview
 
-The Quantitative AI Brain.
-A hyper-resilient, fail-fast, multi-agent financial ingestion pipeline.
+The Socrates Backend is a fully autonomous, production-ready data engineering and AI inference pipeline. Built on an asynchronous FastAPI architecture, it intercepts real-time institutional news, official SEC Edgar filings, and live market valuations.
 
-🚀 Overview
+Unlike standard wrapper applications, Socrates feeds this multi-dimensional data into a custom Retrieval-Augmented Generation (RAG) pipeline powered by Cohere and Groq to synthesize structured, institutional-grade quantitative stock intelligence at sub-second latencies.
 
-The Socrates Backend is a masterclass in defensive programming and data engineering. Built on FastAPI, it aggregates real-time news, official SEC Edgar filings, and live market valuations. It then feeds this data into a Retrieval-Augmented Generation (RAG) pipeline powered by Cohere and Groq to output structured, institutional-grade stock intelligence.
+## ✨ Key Technical Achievements (The "Wow" Factor)
 
-🏆 Architectural Masterpieces
+### 1. The 5-Layer "Fail-Fast" Valuation Cascade
 
-1. The 5-Layer "Fail-Fast" Valuation Cascade (xbrl_service.py)
+Market data APIs actively block cloud servers to deter bot traffic. To guarantee a 100% success rate for structural valuation metrics, Socrates utilizes an aggressive, self-healing 5-layer cascade:
 
-Market data APIs block cloud servers constantly. To guarantee a 100% success rate for gathering structural valuation metrics (Market Cap, P/E, EPS), Socrates utilizes a brutal, fail-fast 5-layer cascade:
+Layer A (SEC & Alpaca): The "True Engineer" approach. Pulls live price from the Alpaca broker SDK and multiplies it by the official SEC SharesOutstanding XBRL tag.
 
-Phase 1 (The Official Record): SEC EDGAR XBRL extraction for perfectly audited Revenue, Debt, and EPS.
+Layer B (FMP & Finnhub): Primary authenticated attempts for live Market Cap, P/E, and EPS.
 
-Phase 2, Layer A (FMP API): Primary attempt at live Market Cap and P/E.
+Layer C (Polygon.io): Emergency authenticated gateway cascade.
 
-Phase 2, Layer B (Finnhub API): Secondary fallback.
+Layer D (Mathematical Derivation): Reconstructing missing Market Caps mathematically via 30-day historical share floats and 5-day close prices.
 
-Phase 2, Layer C (Polygon.io): Emergency authenticated gateway.
+Strict Fail-Fast Logic: Instantly aborts and halts the pipeline if an API explicitly returns a $0.00 price or empty matrix, identifying fake tickers (e.g., NIFTY) to protect API limit burn.
 
-Phase 2, Layer D (YFinance): Universal fallback using fast_info.
+### 2. Deep SEC RAG Vectorization Engine
 
-Phase 2, Layer E (Mathematical Derivation): Reconstructing the P/E ratio mathematically (Price / EPS) if all APIs strip the data.
+Socrates automatically downloads, cleans, and chunks massive 10-K and 20-F SEC filings on demand without blocking the main event loop.
 
-Fail-Fast Logic: If an API responds with 200 OK but returns $0.00 or empty arrays (proving the ticker is entirely fake), the cascade halts immediately, preventing API limit burn.
+Semantic Slicing: Uses LangChain's RecursiveCharacterTextSplitter (1500 chars, 200 overlap) to preserve financial context.
 
-2. Deep SEC RAG Vectorization (vector_service.py)
+Cloud Embedding: Batches text arrays to generate embed-english-v3.0 vectors via the Cohere API.
 
-Socrates automatically downloads, cleans, and chunks massive 10-K and 20-F filings.
+Direct pgvector Injection: Performs bulk asynchronous inserts directly into a Supabase PostgreSQL database.
 
-Uses RecursiveCharacterTextSplitter (1500 chars, 200 overlap).
+Non-Blocking Orchestration: Orchestrates via FastAPI BackgroundTasks, allowing the frontend to poll status independently without triggering HTTP 504 Timeouts.
 
-Batches texts and generates embed-english-v3.0 vectors via Cohere.
+### 3. The "Cache Barrier" & Cost Optimization
 
-Inserts embeddings directly into a Supabase pgvector database.
+To optimize Groq API costs and reduce latency to <0.5s, the AgentService implements a strict PostgreSQL intercept. If an identical report (Standard or Deep RAG) was generated for a requested ticker today, it fetches the JSON payload directly from Supabase, bypassing all heavy LLM computation and vector math.
 
-Runs silently via BackgroundTasks to prevent HTTP timeouts.
+### 4. Advanced NLP Ensemble
 
-3. The "Cache Barrier"
+Leverages the Groq API to run Llama-3.3-70b-versatile at blazing inference speeds. The prompt engineering enforces a rigid JSON schema, processing 3 separate semantic vector queries simultaneously (Risks, Growth, Financials) alongside live Alpaca/Benzinga news streams to synthesize a holistic, conflict-free trading thesis.
 
-To optimize Groq API costs and reduce latency to <0.5 seconds, the AgentService intercepts requests. If an identical report (Standard or Deep RAG) was generated for that ticker today, it fetches the JSON directly from Supabase, bypassing all heavy computation.
+## 🏗️ System Architecture
 
-4. Advanced NLP Ensemble
+Sourcing Pipeline: Multithreaded ingestion of US Macro data (FRED), Institutional News (Alpaca), and Accounting Data (SEC EDGAR).
 
-Leverages Groq (Llama-3.3-70b-versatile). The prompt engineering forces a rigid JSON schema, processing 3 separate semantic vector queries simultaneously (Risks, Growth, Financials) to form a holistic thesis.
+Vectorization Engine: Asynchronous text chunking -> Cohere embeddings -> Supabase pgvector storage.
 
-🧰 Tech Stack
+Inference Engine: Multi-query RAG -> Context Aggregation -> Llama 3 70B JSON inference.
 
-Framework: FastAPI, Uvicorn
+Resilience Layer: Exponential backoffs, fail-fast validations, and strict database constraint barriers.
 
-AI & NLP: Groq (Llama-3), Cohere (Embeddings)
+## 🛠️ Tech Stack & Requirements
 
-Database: Supabase (PostgreSQL + pgvector)
+Framework & Server: fastapi (0.111.0), uvicorn (0.30.1), pydantic (2.13.3)
 
-Market Data APIs: SEC EDGAR, Alpaca, FMP, Finnhub, Polygon, FRED (Macro)
+AI & Vectorization: groq (1.4.0), langchain-text-splitters (1.1.2)
 
-Scheduling: APScheduler (Hourly news sweeps)
+Database & Cloud: supabase (2.5.1) (PostgreSQL + pgvector)
 
-🗄️ Database Schema (Supabase)
+Market Data & Scraping: alpaca-trade-api (3.2.0), yfinance (0.2.41), sec-edgar-downloader (5.1.0), beautifulsoup4 (4.13.4)
 
-Socrates operates on a strictly typed, relational schema:
+Parsing & Scheduling: requests (2.32.3), feedparser (6.0.12), APScheduler (3.11.2)
 
-soc_company_fundamentals: Caches daily valuation snapshots.
+## 🚀 Deployment
 
-soc_news_articles: Deduplicated news pipeline.
+This system is designed for stateless deployment.
 
-soc_sec_filings & soc_filing_chunks: The pgvector RAG memory bank.
-
-soc_research_intelligence: The final AI output cache.
-
-soc_economic_events: US Macro tracking.
-
-⚙️ Quick Start
-
-Environment Setup: Ensure your .env is populated with keys for Supabase, Groq, Cohere, FMP, Finnhub, Polygon, and Alpaca.
-
-Install Requirements:
-
+```
+# Install exact requirements
 pip install -r requirements.txt
 
-
-Boot the Engine:
-
+# Boot the engine in development mode
 uvicorn main:app --reload --port 8000
+```
+
+(Note: Requires active SUPABASE_URL, GROQ_API_KEY, COHERE_API_KEY, APCA_API_KEY_ID, and APCA_API_SECRET_KEY in the .env file).
+
+## 👨‍💻 Author
+
+Amartya Sen | B.Tech in Artificial Intelligence and Machine Learning (Core CSE with Specialization)
+Architecting resilient, autonomous AI systems at the intersection of quantitative finance and deep learning.
