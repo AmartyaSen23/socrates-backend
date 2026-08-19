@@ -128,16 +128,17 @@ class AgentService:
         # ==========================================
         client = Groq(api_key=settings.groq_api_key)
         
-        log_update(ticker, "Agent is synthesizing analysis using Qwen 2.5 32B...")
+        log_update(ticker, "Agent is synthesizing analysis using Qwen 3.6 27B...")
         try:
             completion = client.chat.completions.create(
-                model="qwen-2.5-32b",
+                # Using the exact recommended replacement model from Groq's Aug 16, 2026 deprecation log
+                model="qwen/qwen3.6-27b",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.2, 
-                max_tokens=4096,  # 🛡️ THE FIX: Forces Groq to allocate enough space for the full JSON
+                max_tokens=4096,  # 🛡️ THE FIX: Gives Qwen the runway to close the JSON object
                 response_format={"type": "json_object"} 
             )
 
