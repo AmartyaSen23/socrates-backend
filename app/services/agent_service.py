@@ -128,15 +128,16 @@ class AgentService:
         # ==========================================
         client = Groq(api_key=settings.groq_api_key)
         
-        log_update(ticker, "Agent is synthesizing analysis using Qwen/Qwen3.6-27b...")
+        log_update(ticker, "Agent is synthesizing analysis using Qwen 2.5 32B...")
         try:
             completion = client.chat.completions.create(
-                model="qwen/qwen3.6-27b",
+                model="qwen-2.5-32b",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.2, 
+                max_tokens=4096,  # 🛡️ THE FIX: Forces Groq to allocate enough space for the full JSON
                 response_format={"type": "json_object"} 
             )
 
