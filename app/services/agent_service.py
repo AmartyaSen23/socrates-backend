@@ -128,10 +128,10 @@ class AgentService:
         # ==========================================
         client = Groq(api_key=settings.groq_api_key)
         
-        log_update(ticker, "Agent is synthesizing analysis using Llama-3.3-70b-versatile...")
+        log_update(ticker, "Agent is synthesizing analysis using Qwen/Qwen3.6-27b...")
         try:
             completion = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="qwen/qwen3.6-27b",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
