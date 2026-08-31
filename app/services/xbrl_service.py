@@ -188,19 +188,17 @@ class XBRLService:
                 except Exception as e:
                     log_update(ticker_upper, f"Polygon emergency fallback failed: {e}")
 
-        # --- LAYER D: YFINANCE UNIVERSAL FETCH ---
-        if market_cap is None or current_price is None or pe_ratio is None:
-            log_update(ticker_upper, "Attempting YFinance universal fetch...")
+        # --- LAYER D: YFINANCE UNIVERSAL FETCH (ONLY IF ESSENTIAL DATA IS MISSING) ---
+        if market_cap is None or current_price is None:
+            log_update(ticker_upper, "Attempting YFinance fast fetch...")
             try:
                 stock = yf.Ticker(ticker_upper)
-                info = stock.info
                 
+                # Use fast_info properties instead of blocking stock.info
                 if current_price is None:
-                    current_price = info.get('currentPrice') or info.get('regularMarketPrice')
+                    current_price = getattr(stock.fast_info, 'last_price', None) or getattr(stock.fast_info, 'regular_market_previous_close', None)
                 if market_cap is None:
-                    market_cap = info.get('marketCap') or stock.fast_info.market_cap
-                if pe_ratio is None:
-                    pe_ratio = info.get('trailingPE')
+                    market_cap = getattr(stock.fast_info, 'market_cap', None)
 
                 if current_price and market_cap:
                     log_update(ticker_upper, "YFinance fetch successful: Price and Market Cap retrieved.")
@@ -209,19 +207,14 @@ class XBRLService:
                 else:
                     log_update(ticker_upper, "YFinance fetch failed: No essential data found.")
             except Exception as e:
-                err_msg = str(e)
-                if "Expecting value" in err_msg or "line 1 column 1" in err_msg or "404" in err_msg:
-                    # 🛡️ FAIL FAST: YFinance doesn't know it either
-                    raise ValueError(f"Target '{ticker_upper}' rejected by YFinance. Definitively invalid.")
-                else:
-                    log_update(ticker_upper, f"YFinance minor error: {err_msg}. Proceeding to Layer E...")
+                log_update(ticker_upper, f"YFinance skipped: {e}. Moving to mathematical derivation...")
 
         # --- LAYER E: MATH DERIVATION FALLBACK ---
         if pe_ratio is None and current_price and eps:
             eps_float = float(eps)
             if eps_float > 0:
                 pe_ratio = current_price / eps_float
-                log_update(ticker_upper, f"Calculated positive P/E ratio mathematically (Warning: Check if quarterly or TTM): {pe_ratio:.2f}")
+                log_update(ticker_upper, f"Calculated positive P/E ratio mathematically: {pe_ratio:.2f}")
             elif eps_float < 0:
                 log_update(ticker_upper, f"Skipped P/E calculation: Company is unprofitable (Negative EPS: {eps_float}).")
             else:
