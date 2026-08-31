@@ -153,7 +153,7 @@ class XBRLService:
                 log_update(ticker_upper, f"Finnhub fallback exception: {e}")
 
         # --- LAYER C: POLYGON.IO EMERGENCY AUTHENTICATED FALLBACK ---
-        if market_cap is None or current_price is None or pe_ratio is None:
+        if market_cap is None or current_price is None:
             if settings.polygon_api_key:
                 log_update(ticker_upper, "Cascading to Polygon.io Emergency Gateway...")
                 try:
