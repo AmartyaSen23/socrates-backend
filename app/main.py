@@ -20,7 +20,7 @@ app.add_middleware(
         "http://localhost:3000",
         "https://socrates-frontend.vercel.app",
         "https://socrates-frontend-blush.vercel.app",
-        "https://socrates-frontend-amartya-sens-projects-b10cf8e1.vercel.app/"
+        "https://socrates-frontend-amartya-sens-projects-b10cf8e1.vercel.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
