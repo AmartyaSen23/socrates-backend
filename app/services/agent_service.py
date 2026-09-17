@@ -8,6 +8,35 @@ from app.status_store import log_update, get_logs, clear_logs
 
 class AgentService:
     @staticmethod
+    def get_dynamic_fallback_model(client: Groq) -> str:
+        """
+        Pings Groq's API for currently active models available to the user's tier,
+        and selects the best reasoning model available based on parameter count.
+        """
+        try:
+            available_models = client.models.list().data
+            model_ids = [m.id for m in available_models]
+            
+            # We want high-parameter models for deep research.
+            # Groq's current naming conventions include the parameter count (e.g., 120b, 70b, 32b)
+            priority_sizes = ["120b", "70b", "32b", "27b", "20b", "8b"]
+            
+            for size in priority_sizes:
+                for m_id in model_ids:
+                    # Filter out guardrails, whisper (audio), or TTS models
+                    if size in m_id.lower() and not any(x in m_id.lower() for x in ["guard", "whisper", "tts"]):
+                        return m_id
+                        
+            # If no parameter count is found in the name, just return the first standard text model
+            for m_id in model_ids:
+                if "whisper" not in m_id.lower() and "tts" not in m_id.lower():
+                    return m_id
+                    
+            return "openai/gpt-oss-120b" # Hardcoded ultimate safety net
+        except Exception:
+            return "openai/gpt-oss-120b"
+
+    @staticmethod
     def generate_intelligence_report(ticker: str, use_rag: bool = False):
         ticker = ticker.upper()
         today_str = datetime.utcnow().strftime('%Y-%m-%d')
@@ -128,25 +157,57 @@ class AgentService:
         # ==========================================
         client = Groq(api_key=settings.groq_api_key)
         
-        log_update(ticker, "Agent is synthesizing analysis using Qwen 3.6 27B...")
-        try:
-            completion = client.chat.completions.create(
-                # Using the exact recommended replacement model from Groq's Aug 16, 2026 deprecation log
-                model="qwen/qwen3.6-27b",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.2, 
-                max_tokens=4096,  # 🛡️ THE FIX: Gives Qwen the runway to close the JSON object
-                response_format={"type": "json_object"} 
-            )
+        current_model = "qwen/qwen3.6-27b"
+        current_max_tokens = 4096
+        
+        max_retries = 3
+        intelligence_data = None
+        
+        for attempt in range(max_retries):
+            log_update(ticker, f"Agent is synthesizing analysis using {current_model} (Attempt {attempt + 1})...")
+            try:
+                completion = client.chat.completions.create(
+                    model=current_model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.2, 
+                    max_tokens=current_max_tokens, 
+                    response_format={"type": "json_object"} 
+                )
 
-            raw_json = completion.choices[0].message.content
-            intelligence_data = json.loads(raw_json)
-            log_update(ticker, "Groq successfully generated the JSON report!")
-        except Exception as e:
-            raise Exception(f"Groq API Error: {str(e)}")
+                raw_json = completion.choices[0].message.content
+                intelligence_data = json.loads(raw_json)
+                log_update(ticker, "Groq successfully generated the JSON report!")
+                break # Success, exit retry loop
+                
+            except Exception as e:
+                err_str = str(e)
+                
+                # ERROR 1: Model Not Found / Decommissioned (404)
+                if "model_not_found" in err_str or "does not exist" in err_str or "404" in err_str:
+                    log_update(ticker, f"⚠️ Model '{current_model}' is decommissioned or access is restricted.")
+                    log_update(ticker, "Pinging Groq API for live available models...")
+                    
+                    # Dynamically fetch a working model and retry
+                    current_model = AgentService.get_dynamic_fallback_model(client)
+                    log_update(ticker, f"🔄 Dynamic Fallback: Rerouting to '{current_model}' for retry...")
+                    continue
+                    
+                # ERROR 2: Max Token Limit Reached
+                elif "max completion tokens reached" in err_str.lower() or "limit reached" in err_str.lower() or "failed_generation" in err_str.lower():
+                    log_update(ticker, f"⚠️ Payload too large for {current_max_tokens} tokens. Expanding context window...")
+                    # Expand runway to handle overly verbose outputs
+                    current_max_tokens*= 2
+                    log_update(ticker, f"🔄 Retrying with max_tokens={current_max_tokens}")
+                    continue
+                    
+                else:
+                    raise Exception(f"Groq API Error: {err_str}")
+
+        if not intelligence_data:
+            raise Exception("Failed to generate intelligence report after all fallback retries.")
 
         # ==========================================
         # 6. Map and Insert into Intelligence DB
