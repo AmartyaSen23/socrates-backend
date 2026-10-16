@@ -1,8 +1,9 @@
 import re
 import requests
+from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, HTTPException, BackgroundTasks
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from app.services.xbrl_service import XBRLService
 from app.services.news_service import NewsService
 from app.services.sec_service import SECService
@@ -22,6 +23,15 @@ class VectorizeRequest(BaseModel):
     filing_id: str
     storage_bucket_url: str
     ticker: str
+
+
+class FeedbackCreateRequest(BaseModel):
+    user_name: str = Field(default="Anonymous Quant", max_length=80)
+    user_role: str = Field(default="Institutional Researcher", max_length=80)
+    rating: int = Field(ge=1, le=5)
+    category: str = Field(default="General Platform", max_length=60)
+    ticker_context: Optional[str] = Field(default=None, max_length=15)
+    message: str = Field(min_length=2, max_length=2000)
 
 
 router = APIRouter(prefix="/api/v1/ingestion", tags=["Ingestion"])
@@ -265,8 +275,12 @@ async def ingest_macro_economy():
 
 
 @router.get("/history")
-async def get_research_history(limit: int = 30):
-    """Returns recent cached intelligence reports for the left sidebar history & instant switching."""
+async def get_research_history(limit: int = 30, min_days_apart: int = 7, unique_only: bool = True):
+    """
+    Returns cached intelligence reports for the left sidebar Vault.
+    Deduplicates by (ticker, is_deep_rag) or enforces a minimum 7-day temporal window
+    between snapshots of the same ticker+mode so the Vault stays clean and institutional.
+    """
     try:
         safe_limit = max(1, min(100, limit))
         res = (
@@ -277,12 +291,125 @@ async def get_research_history(limit: int = 30):
             )
             .order("analysis_date", desc=True)
             .order("created_at", desc=True)
+            .limit(120)
+            .execute()
+        )
+        raw_rows = res.data or []
+        curated = []
+        last_kept_date_by_key = {}
+
+        for row in raw_rows:
+            ticker_val = (row.get("ticker") or "").strip().upper()
+            is_deep_val = bool(row.get("is_deep_rag", False))
+            date_str = str(row.get("analysis_date") or "")[:10]
+            if not ticker_val or not date_str:
+                continue
+
+            key = (ticker_val, is_deep_val)
+            if key not in last_kept_date_by_key:
+                last_kept_date_by_key[key] = date_str
+                curated.append(row)
+            elif not unique_only and min_days_apart > 0:
+                try:
+                    d_prev = datetime.strptime(last_kept_date_by_key[key], "%Y-%m-%d")
+                    d_curr = datetime.strptime(date_str, "%Y-%m-%d")
+                    if abs((d_prev - d_curr).days) >= min_days_apart:
+                        last_kept_date_by_key[key] = date_str
+                        curated.append(row)
+                except ValueError:
+                    pass
+
+            if len(curated) >= safe_limit:
+                break
+
+        return {"status": "success", "data": curated}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase Error: {sanitize_log_message(str(e))}")
+
+
+@router.get("/search")
+async def search_equities(q: str = ""):
+    """Live equity ticker autocomplete endpoint for the frontend command bar."""
+    cleaned_q = (q or "").strip()
+    if not cleaned_q:
+        return {"status": "success", "data": []}
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        url = "https://query2.finance.yahoo.com/v1/finance/search"
+        res = requests.get(
+            url,
+            params={"q": cleaned_q[:30], "quotesCount": 8},
+            headers=headers,
+            timeout=4,
+        )
+        results = []
+        if res.status_code == 200:
+            for item in res.json().get("quotes", []):
+                sym = item.get("symbol")
+                if sym and item.get("quoteType") == "EQUITY":
+                    results.append({
+                        "symbol": sym,
+                        "name": item.get("shortname") or item.get("longname") or sym,
+                        "exchange": item.get("exchDisp") or item.get("exchange") or "US",
+                    })
+                if len(results) >= 6:
+                    break
+        return {"status": "success", "data": results}
+    except Exception:
+        return {"status": "success", "data": []}
+
+
+@router.get("/feedback")
+async def get_feedbacks(limit: int = 20):
+    """Retrieves user feedbacks and rating telemetry from Supabase `soc_feedbacks` table."""
+    try:
+        safe_limit = max(1, min(50, limit))
+        res = (
+            supabase_client.table("soc_feedbacks")
+            .select("*")
+            .order("created_at", desc=True)
             .limit(safe_limit)
             .execute()
         )
         return {"status": "success", "data": res.data or []}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Supabase Error: {sanitize_log_message(str(e))}")
+        # Return graceful empty list if the user hasn't run add_table.txt SQL yet
+        return {"status": "pending_table", "data": [], "detail": sanitize_log_message(str(e))}
+
+
+@router.post("/feedback")
+async def submit_feedback(payload: FeedbackCreateRequest):
+    """Stores a new user rating and feedback record into the Supabase `soc_feedbacks` table."""
+    try:
+        clean_name = (payload.user_name or "Anonymous Quant").strip()[:80] or "Anonymous Quant"
+        clean_role = (payload.user_role or "Institutional Researcher").strip()[:80] or "Institutional Researcher"
+        clean_cat = (payload.category or "General Platform").strip()[:60] or "General Platform"
+        clean_ticker = (
+            payload.ticker_context.strip().lstrip("$").upper()[:12]
+            if payload.ticker_context and payload.ticker_context.strip()
+            else None
+        )
+        clean_msg = payload.message.strip()
+        if not clean_msg:
+            raise HTTPException(status_code=400, detail="Feedback message cannot be empty.")
+
+        db_row = {
+            "user_name": clean_name,
+            "user_role": clean_role,
+            "rating": max(1, min(5, int(payload.rating))),
+            "category": clean_cat,
+            "ticker_context": clean_ticker,
+            "message": clean_msg,
+        }
+        res = supabase_client.table("soc_feedbacks").insert(db_row).execute()
+        return {"status": "success", "data": res.data}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to store feedback in Supabase (Ensure `soc_feedbacks` table is created via add_table.txt): {sanitize_log_message(str(e))}",
+        )
 
 
 @router.get("/report/{ticker}")
