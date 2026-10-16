@@ -1,4 +1,8 @@
 .env
-   __pycache__/
-   *.pyc
-   temp_sec_*/
+__pycache__/
+*.py[cod]
+*$py.class
+temp_sec_*/
+.venv/
+venv/
+*.log
