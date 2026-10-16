@@ -238,6 +238,14 @@ class XBRLService:
             try:
                 fmp_url = f"https://financialmodelingprep.com/api/v3/profile/{ticker_upper}"
                 res = requests.get(fmp_url, params={"apikey": settings.fmp_api_key}, timeout=5)
+                if res.status_code in (403, 401):
+                    # Try FMP stable endpoint for newer API keys / ADR tiers
+                    stable_url = "https://financialmodelingprep.com/stable/profile"
+                    res = requests.get(
+                        stable_url,
+                        params={"symbol": ticker_upper, "apikey": settings.fmp_api_key},
+                        timeout=5,
+                    )
                 if res.status_code == 200:
                     data_list = res.json()
                     if isinstance(data_list, list):
@@ -249,13 +257,13 @@ class XBRLService:
                         else:
                             profile_obj = data_list[0]
                             current_price = profile_obj.get("price")
-                            market_cap = profile_obj.get("mktCap")
+                            market_cap = profile_obj.get("mktCap") or profile_obj.get("marketCap")
                             pe_ratio = profile_obj.get("pe")
                             log_update(ticker_upper, "Successfully extracted valuation from FMP Profile.")
                     else:
                         log_update(ticker_upper, "FMP quota or endpoint restriction encountered. Cascading...")
                 else:
-                    log_update(ticker_upper, f"FMP Profile unavailable: Status {res.status_code}")
+                    log_update(ticker_upper, "Primary FMP tier restricted for asset. Routing to Finnhub Gateway...")
             except ValueError as ve:
                 raise ve
             except Exception:

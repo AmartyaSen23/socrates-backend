@@ -145,6 +145,61 @@ class AgentService:
         }
 
     @staticmethod
+    def _fetch_supporting_context(ticker: str) -> Dict[str, Any]:
+        """Fetches latest fundamentals, verified news, and SEC filing metadata for UI enrichment."""
+        fundamentals = None
+        news_items = []
+        sec_filing = None
+
+        try:
+            fund_res = (
+                supabase_client.table("soc_company_fundamentals")
+                .select("ticker, fiscal_date, market_cap, revenue, total_debt, eps, pe_ratio")
+                .eq("ticker", ticker)
+                .order("fiscal_date", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if fund_res.data:
+                fundamentals = fund_res.data[0]
+        except Exception:
+            pass
+
+        try:
+            news_res = (
+                supabase_client.table("soc_news_articles")
+                .select("title, summary, url, published_at")
+                .eq("ticker", ticker)
+                .order("published_at", desc=True)
+                .limit(15)
+                .execute()
+            )
+            if news_res.data:
+                news_items = news_res.data
+        except Exception:
+            pass
+
+        try:
+            sec_res = (
+                supabase_client.table("soc_sec_filings")
+                .select("form_type, filed_at, is_ready")
+                .eq("ticker", ticker)
+                .order("filed_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if sec_res.data:
+                sec_filing = sec_res.data[0]
+        except Exception:
+            pass
+
+        return {
+            "fundamentals": fundamentals,
+            "news": news_items,
+            "sec_filing": sec_filing,
+        }
+
+    @staticmethod
     def generate_intelligence_report(ticker: str, use_rag: bool = False):
         ticker = ticker.strip().upper()
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -165,7 +220,11 @@ class AgentService:
         if cached_res.data:
             log_update(ticker, "⚡ CACHE HIT! Returning instant pre-computed response.")
             db_row = cached_res.data[0]
+            supporting = AgentService._fetch_supporting_context(ticker)
             standardized_data = {
+                "ticker": ticker,
+                "analysis_date": db_row.get("analysis_date") or today_str,
+                "is_deep_rag": bool(db_row.get("is_deep_rag", use_rag)),
                 "sentiment_score": db_row.get("sentiment_score"),
                 "sentiment_label": db_row.get("sentiment_label"),
                 "risk_score": db_row.get("risk_score"),
@@ -175,6 +234,10 @@ class AgentService:
                 "confidence_score": db_row.get("confidence_score"),
                 "bull_case_summary": db_row.get("bull_case_summary"),
                 "bear_case_summary": db_row.get("bear_case_summary"),
+                "fundamentals": supporting["fundamentals"],
+                "news": supporting["news"],
+                "sec_filing": supporting["sec_filing"],
+                "cached": True,
             }
             return {"status": "success", "data": standardized_data}
 
@@ -182,36 +245,22 @@ class AgentService:
         # 2. Gather Context (News, Fundamentals & Macro)
         # ==========================================
         log_update(ticker, "Cache miss. Generating fresh intelligence...")
-        news_res = (
-            supabase_client.table("soc_news_articles")
-            .select("title, summary, published_at")
-            .eq("ticker", ticker)
-            .order("published_at", desc=True)
-            .limit(15)
-            .execute()
-        )
-        fund_res = (
-            supabase_client.table("soc_company_fundamentals")
-            .select("*")
-            .eq("ticker", ticker)
-            .order("fiscal_date", desc=True)
-            .limit(1)
-            .execute()
-        )
+        supporting = AgentService._fetch_supporting_context(ticker)
+        news_list = supporting["news"]
+        f_row = supporting["fundamentals"]
 
-        if not news_res.data and not fund_res.data:
+        if not news_list and not f_row:
             raise Exception(f"Insufficient data to analyze {ticker}")
 
         news_context = (
             "\n".join([
                 f"- {(n.get('published_at') or '')[:10]}: {n.get('title', '')} ({n.get('summary', '')})"
-                for n in (news_res.data or [])
+                for n in news_list
             ])
             or "No recent institutional news articles available."
         )
 
-        if fund_res.data:
-            f_row = fund_res.data[0]
+        if f_row:
             fund_context = json.dumps({
                 "ticker": f_row.get("ticker"),
                 "fiscal_date": f_row.get("fiscal_date"),
@@ -227,13 +276,25 @@ class AgentService:
         # Fetch macro context if available in DB (zero external API cost)
         macro_context = "No macroeconomic data cached."
         try:
-            macro_res = supabase_client.table("soc_economic_events").select("*").limit(10).execute()
+            macro_res = (
+                supabase_client.table("soc_economic_events")
+                .select("*")
+                .order("released_at", desc=True)
+                .limit(10)
+                .execute()
+            )
             if macro_res.data:
-                macro_lines = [
-                    f"- {m.get('event_name')}: {m.get('actual_value')} (as of {m.get('released_at')})"
-                    for m in macro_res.data
-                ]
-                macro_context = "\n".join(macro_lines)
+                seen_events = set()
+                macro_lines = []
+                for m in macro_res.data:
+                    ev_name = m.get("event_name")
+                    if ev_name and ev_name not in seen_events:
+                        seen_events.add(ev_name)
+                        macro_lines.append(
+                            f"- {ev_name}: {m.get('actual_value')} (as of {m.get('released_at')})"
+                        )
+                if macro_lines:
+                    macro_context = "\n".join(macro_lines)
         except Exception:
             pass
 
@@ -362,9 +423,9 @@ You must output ONLY valid JSON matching this exact schema:
                 if any(
                     k in err_lower
                     for k in [
-                        "model_not_found", "does not exist", "decommissioned", "404",
+                        "model_not_found", "does not exist", "decommissioned", "status code: 404", "error code: 404",
                         "rate_limit", "rate limit", "429", "too many requests",
-                        "503", "502", "over capacity", "service unavailable",
+                        "status code: 503", "status code: 502", "over capacity", "service unavailable",
                     ]
                 ):
                     tried_models.add(current_model)
@@ -418,6 +479,24 @@ You must output ONLY valid JSON matching this exact schema:
             supabase_client.table("soc_research_intelligence").upsert(
                 db_payload, on_conflict="ticker,analysis_date,is_deep_rag"
             ).execute()
-            return {"status": "success", "data": intelligence_data}
         except Exception as e:
-            raise Exception(f"Supabase Database Error: {str(e)}")
+            print(f"[{ticker}] Warning: Upsert with is_deep_rag conflict failed ({e}), trying ticker,analysis_date...")
+            try:
+                supabase_client.table("soc_research_intelligence").upsert(
+                    db_payload, on_conflict="ticker,analysis_date"
+                ).execute()
+            except Exception as inner_e:
+                raise Exception(f"Supabase Database Error: {str(inner_e)}")
+
+        enriched_data = {
+            **intelligence_data,
+            "ticker": ticker,
+            "analysis_date": today_str,
+            "is_deep_rag": use_rag,
+            "model_used": current_model,
+            "fundamentals": f_row,
+            "news": news_list,
+            "sec_filing": supporting["sec_filing"],
+            "cached": False,
+        }
+        return {"status": "success", "data": enriched_data}
