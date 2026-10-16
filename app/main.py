@@ -4,15 +4,23 @@ from app.routers import ingestion
 from app.scheduler import scheduler
 from contextlib import asynccontextmanager
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Starting background scheduler...")
-    scheduler.start()
+    if not scheduler.running:
+        scheduler.start()
     yield
     print("Shutting down background scheduler...")
-    scheduler.shutdown()
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
 
-app = FastAPI(title="Socrates Research Engine Backend", version="1.0.0", lifespan=lifespan)
+
+app = FastAPI(
+    title="Socrates Research Engine Backend",
+    version="1.1.0",
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -22,14 +30,16 @@ app.add_middleware(
         "https://socrates-frontend-blush.vercel.app",
         "https://socrates-frontend-amartya-sens-projects-b10cf8e1.vercel.app",
         "https://socrates-frontend-git-main-amartya-sens-projects-b10cf8e1.vercel.app",
-        "https://socrates-frontend-rjh60be2e-amartya-sens-projects-b10cf8e1.vercel.app"
+        "https://socrates-frontend-rjh60be2e-amartya-sens-projects-b10cf8e1.vercel.app",
     ],
+    allow_origin_regex=r"https://socrates-frontend.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(ingestion.router)
+
 
 @app.get("/")
 @app.head("/")
