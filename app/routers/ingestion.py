@@ -1,5 +1,6 @@
 import re
 import requests
+from typing import Optional
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from app.services.xbrl_service import XBRLService
@@ -231,12 +232,26 @@ async def generate_deep_research_report(ticker: str, background_tasks: Backgroun
         raise HTTPException(status_code=500, detail=sanitize_log_message(str(e)))
 
 
-# --- MANUAL ROUTES ---
+# --- MANUAL & DASHBOARD ROUTES ---
 @router.get("/macro")
 async def get_macro_data():
     try:
-        res = supabase_client.table("soc_economic_events").select("*").execute()
-        return {"status": "success", "data": res.data}
+        res = (
+            supabase_client.table("soc_economic_events")
+            .select("*")
+            .order("released_at", desc=True)
+            .limit(20)
+            .execute()
+        )
+        raw_rows = res.data or []
+        seen = set()
+        deduped = []
+        for row in raw_rows:
+            ev = row.get("event_name")
+            if ev and ev not in seen:
+                seen.add(ev)
+                deduped.append(row)
+        return {"status": "success", "data": deduped}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Supabase Error: {sanitize_log_message(str(e))}")
 
@@ -249,9 +264,137 @@ async def ingest_macro_economy():
         raise HTTPException(status_code=500, detail=sanitize_log_message(str(e)))
 
 
+@router.get("/history")
+async def get_research_history(limit: int = 30):
+    """Returns recent cached intelligence reports for the left sidebar history & instant switching."""
+    try:
+        safe_limit = max(1, min(100, limit))
+        res = (
+            supabase_client.table("soc_research_intelligence")
+            .select(
+                "id, ticker, analysis_date, is_deep_rag, sentiment_score, sentiment_label, "
+                "risk_score, bullish_score, confidence_score, created_at"
+            )
+            .order("analysis_date", desc=True)
+            .order("created_at", desc=True)
+            .limit(safe_limit)
+            .execute()
+        )
+        return {"status": "success", "data": res.data or []}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase Error: {sanitize_log_message(str(e))}")
+
+
+@router.get("/report/{ticker}")
+async def get_cached_report(ticker: str, is_deep_rag: Optional[bool] = None, analysis_date: Optional[str] = None):
+    """Instantly retrieves a cached intelligence report and its supporting context without re-running LLM inference."""
+    try:
+        ticker_upper = normalize_and_validate_ticker(ticker)
+        query = (
+            supabase_client.table("soc_research_intelligence")
+            .select("*")
+            .eq("ticker", ticker_upper)
+        )
+        if is_deep_rag is not None:
+            query = query.eq("is_deep_rag", is_deep_rag)
+        if analysis_date:
+            query = query.eq("analysis_date", analysis_date)
+
+        res = query.order("analysis_date", desc=True).order("created_at", desc=True).limit(1).execute()
+        if not res.data:
+            raise HTTPException(status_code=404, detail=f"No cached report found for {ticker_upper}.")
+
+        formatted = AgentService.format_report_record(res.data[0], include_supporting=True)
+        return {"status": "success", "data": formatted}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=sanitize_log_message(str(e)))
+
+
+@router.get("/watchlist")
+async def get_watchlist():
+    """Returns active tracked tickers in the autonomous watchlist along with their latest fundamentals & sentiment."""
+    try:
+        res = (
+            supabase_client.table("soc_watchlist")
+            .select("*")
+            .eq("is_active", True)
+            .order("added_at", desc=False)
+            .execute()
+        )
+        items = res.data or []
+        return {"status": "success", "data": items}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase Error: {sanitize_log_message(str(e))}")
+
+
+@router.post("/watchlist/{ticker}")
+async def add_to_watchlist(ticker: str):
+    """Adds or reactivates a ticker in the autonomous watchlist."""
+    try:
+        ticker_upper = normalize_and_validate_ticker(ticker)
+        payload = {"ticker": ticker_upper, "is_active": True}
+        res = (
+            supabase_client.table("soc_watchlist")
+            .upsert(payload, on_conflict="ticker")
+            .execute()
+        )
+        return {"status": "success", "data": res.data}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase Error: {sanitize_log_message(str(e))}")
+
+
+@router.delete("/watchlist/{ticker}")
+async def remove_from_watchlist(ticker: str):
+    """Deactivates a ticker from the autonomous watchlist."""
+    try:
+        ticker_upper = normalize_and_validate_ticker(ticker)
+        res = (
+            supabase_client.table("soc_watchlist")
+            .update({"is_active": False})
+            .eq("ticker", ticker_upper)
+            .execute()
+        )
+        return {"status": "success", "data": res.data}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase Error: {sanitize_log_message(str(e))}")
+
+
 # --- LIVE STATUS CONSOLE (TIER 4) ---
 @router.get("/status/{ticker}")
 async def get_pipeline_status(ticker: str):
-    """Returns the live terminal output logs for the requested ticker."""
+    """Returns the live terminal output logs and SEC vectorization state for the requested ticker."""
     clean_ticker = (ticker or "").strip().lstrip("$").strip().upper()
-    return {"status": "success", "logs": get_logs(clean_ticker)}
+    sec_ready = False
+    sec_form = None
+    sec_filed_at = None
+    try:
+        if clean_ticker and _TICKER_REGEX.match(clean_ticker):
+            sec_res = (
+                supabase_client.table("soc_sec_filings")
+                .select("form_type, filed_at, is_ready")
+                .eq("ticker", clean_ticker)
+                .order("filed_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if sec_res.data:
+                sec_ready = bool(sec_res.data[0].get("is_ready"))
+                sec_form = sec_res.data[0].get("form_type")
+                sec_filed_at = sec_res.data[0].get("filed_at")
+    except Exception:
+        pass
+
+    return {
+        "status": "success",
+        "logs": get_logs(clean_ticker),
+        "is_vectorizing": is_vectorizing(clean_ticker),
+        "sec_ready": sec_ready,
+        "sec_form": sec_form,
+        "sec_filed_at": sec_filed_at,
+    }
