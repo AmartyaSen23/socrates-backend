@@ -418,7 +418,7 @@ Architecting fault-tolerant, autonomous AI systems at the intersection of quanti
 <p align="center">
   <a href="https://www.linkedin.com/in/amartya-sen"><img src="https://img.shields.io/badge/LinkedIn-Amartya_Sen-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white" alt="LinkedIn" /></a>
   <a href="https://github.com/AmartyaSen23"><img src="https://img.shields.io/badge/GitHub-@AmartyaSen23-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub" /></a>
-  <a href="https://socrates-frontend.vercel.app"><img src="https://img.shields.io/badge/Launch-Socrates_Terminal-10B981?style=for-the-badge&logo=vercel&logoColor=white" alt="Live Demo" /></a>
+  <a href="https://socrates-frontend-blush.vercel.app/"><img src="https://img.shields.io/badge/Launch-Socrates_Terminal-10B981?style=for-the-badge&logo=vercel&logoColor=white" alt="Live Demo" /></a>
 </p>
 
 <img src="https://capsule-render.vercel.app/api?type=waving&color=0:04070d,50:064e3b,100:0284c7&height=110&section=footer" width="100%" alt="Footer Wave" />
